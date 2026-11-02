@@ -363,7 +363,7 @@ public sealed class WorkspaceManager(ILogger<WorkspaceManager> logger, TimeProvi
     /// Stores file paths and project IDs alongside timestamps to avoid Roslyn lookups
     /// during the per-call refresh hot path.
     ///
-    /// Build files (.csproj plus the Directory.* files that feed into them) additionally
+    /// Build files (.csproj, its obj/project.assets.json, and the Directory.* files that feed into them) additionally
     /// get a content hash. A reload is the most expensive thing this server does, and a
     /// timestamp alone cannot tell a real edit from a rewrite with identical content —
     /// which is what a branch switch or a formatter produces across many files at once.
@@ -382,7 +382,10 @@ public sealed class WorkspaceManager(ILogger<WorkspaceManager> logger, TimeProvi
             if (project is null) continue;
 
             if (project.FilePath is not null)
+            {
                 TrackBuildFile(project.FilePath);
+                TrackBuildFile(GetAssetsFilePath(project.FilePath), trackWhenMissing: true);
+            }
 
             foreach (var document in project.Documents)
             {
@@ -430,10 +433,29 @@ public sealed class WorkspaceManager(ILogger<WorkspaceManager> logger, TimeProvi
         }
     }
 
-    private void TrackBuildFile(string path)
+    /// <summary>
+    /// The restore output a project's references come from. Until restore has written it,
+    /// MSBuild resolves only direct project references: everything a project reaches
+    /// transitively (a type from a project two hops away, a package) is missing, its code
+    /// binds with errors, and find_callers / find_references silently skip those call sites.
+    /// A restore or build then fixes the compilation without touching any csproj, so this
+    /// file must be watched too. Assumes the default obj/ intermediate folder.
+    /// </summary>
+    private static string GetAssetsFilePath(string projectFilePath) =>
+        Path.Combine(Path.GetDirectoryName(projectFilePath)!, "obj", "project.assets.json");
+
+    /// <param name="trackWhenMissing">
+    /// Record a file that does not exist yet, so that it appearing later counts as a change.
+    /// </param>
+    private void TrackBuildFile(string path, bool trackWhenMissing = false)
     {
         var writeTime = File.GetLastWriteTimeUtc(path);
-        if (writeTime.Year < 1900) return;
+        if (writeTime.Year < 1900)
+        {
+            // A missing file keeps the year-1601 sentinel, so it only reads as changed once it exists.
+            if (trackWhenMissing) _buildFiles[path] = new BuildFileInfo(writeTime, null);
+            return;
+        }
 
         _buildFiles[path] = new BuildFileInfo(writeTime, ComputeHash(path));
     }

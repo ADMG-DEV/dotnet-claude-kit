@@ -94,6 +94,48 @@ public sealed class BuildFileChangeDetectionTests : IDisposable
     }
 
     [Fact]
+    public async Task Refresh_RestoreOutputAppears_Reloads()
+    {
+        var ct = TestContext.Current.CancellationToken;
+
+        // Loaded before the first restore (a fresh clone or worktree): only direct project
+        // references resolve, so transitive types are missing and their call sites drop out
+        // of find_callers. The restore that fixes this edits no csproj.
+        var assetsPath = Path.Combine(_root, "SampleApi", "obj", "project.assets.json");
+        if (File.Exists(assetsPath)) File.Delete(assetsPath);
+
+        await _workspace.LoadSolutionAsync(SolutionPath, ct);
+        var loadsAfterInitial = _workspace.LoadCount;
+
+        Directory.CreateDirectory(Path.GetDirectoryName(assetsPath)!);
+        await File.WriteAllTextAsync(assetsPath, "{ \"version\": 3 }", ct);
+        File.SetLastWriteTimeUtc(assetsPath, DateTime.UtcNow.AddMinutes(1));
+
+        _clock.Advance(PastCooldown);
+        await _workspace.RefreshChangedDocumentsAsync(ct);
+
+        Assert.Equal(loadsAfterInitial + 1, _workspace.LoadCount);
+    }
+
+    [Fact]
+    public async Task Refresh_RestoreOutputStillMissing_DoesNotReload()
+    {
+        var ct = TestContext.Current.CancellationToken;
+        var assetsPath = Path.Combine(_root, "SampleApi", "obj", "project.assets.json");
+        if (File.Exists(assetsPath)) File.Delete(assetsPath);
+
+        await _workspace.LoadSolutionAsync(SolutionPath, ct);
+        var loadsAfterInitial = _workspace.LoadCount;
+
+        _clock.Advance(PastCooldown);
+        await _workspace.RefreshChangedDocumentsAsync(ct);
+        _clock.Advance(PastCooldown);
+        await _workspace.RefreshChangedDocumentsAsync(ct);
+
+        Assert.Equal(loadsAfterInitial, _workspace.LoadCount);
+    }
+
+    [Fact]
     public async Task Refresh_NewSourceFile_DetectedByBackgroundScanNotInline()
     {
         var ct = TestContext.Current.CancellationToken;
