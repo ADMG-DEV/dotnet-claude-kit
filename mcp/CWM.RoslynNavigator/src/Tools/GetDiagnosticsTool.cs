@@ -47,7 +47,7 @@ public static class GetDiagnosticsTool
                 if (scope == "file" && path is not null)
                 {
                     var diagPath = diag.Location.GetLineSpan().Path;
-                    if (diagPath is null || !diagPath.EndsWith(path, StringComparison.OrdinalIgnoreCase))
+                    if (!SourcePaths.EndsWithPath(diagPath, path))
                         continue;
                 }
 
@@ -87,7 +87,7 @@ public static class GetDiagnosticsTool
 
         var document = solution.Projects
             .SelectMany(p => p.Documents)
-            .FirstOrDefault(d => d.FilePath?.EndsWith(path, StringComparison.OrdinalIgnoreCase) == true);
+            .FirstOrDefault(d => SourcePaths.EndsWithPath(d.FilePath, path));
 
         if (document is null)
             return [];
@@ -105,7 +105,7 @@ public static class GetDiagnosticsTool
         var project = solution.Projects
             .FirstOrDefault(p =>
                 p.Name.Equals(path, StringComparison.OrdinalIgnoreCase) ||
-                (p.FilePath?.EndsWith(path, StringComparison.OrdinalIgnoreCase) == true));
+                SourcePaths.EndsWithPath(p.FilePath, path));
 
         if (project is null)
             return [];

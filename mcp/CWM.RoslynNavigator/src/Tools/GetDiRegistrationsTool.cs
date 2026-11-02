@@ -51,7 +51,7 @@ public static class GetDiRegistrationsTool
             foreach (var typeDecl in root.DescendantNodes().OfType<TypeDeclarationSyntax>())
                 typeDeclarations.TryAdd(typeDecl.Identifier.Text, typeDecl);
 
-            if (file is not null && !document.FilePath.Contains(file, StringComparison.OrdinalIgnoreCase))
+            if (file is not null && !SourcePaths.ContainsPath(document.FilePath, file))
                 continue;
 
             foreach (var registration in AnalyzeRoot(root, document.FilePath))

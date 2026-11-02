@@ -93,7 +93,7 @@ public static class FindDeadCodeTool
             var isTestProject = SourceClassifier.IsTestProject(project, compilation);
 
             var trees = scope == "file" && path is not null
-                ? compilation.SyntaxTrees.Where(t => t.FilePath?.Contains(path, StringComparison.OrdinalIgnoreCase) == true)
+                ? compilation.SyntaxTrees.Where(t => SourcePaths.ContainsPath(t.FilePath, path))
                 : compilation.SyntaxTrees;
 
             foreach (var tree in trees)

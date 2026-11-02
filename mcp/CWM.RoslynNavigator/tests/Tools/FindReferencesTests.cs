@@ -27,6 +27,23 @@ public class FindReferencesTests(TestSolutionFixture fixture) : IClassFixture<Te
         Assert.True(result.Count > 0);
     }
 
+    [Theory]
+    [InlineData("SampleDomain/IProductRepository.cs")]
+    [InlineData("SampleDomain\\IProductRepository.cs")]
+    public async Task FindReferences_FileHintWithEitherSeparator_PicksThatFilesSymbol(string file)
+    {
+        // GetByIdAsync is declared in five files. A multi-segment hint written with the other
+        // platform's separator used to match nothing, so the hint was dropped and the call
+        // answered for another GetByIdAsync (or reported an ambiguity) instead.
+        var json = await FindReferencesTool.ExecuteAsync(
+            fixture.WorkspaceManager, "GetByIdAsync", file: file, line: 8,
+            ct: TestContext.Current.CancellationToken);
+        var result = JsonSerializer.Deserialize<ReferencesResult>(json)!;
+
+        Assert.Contains(result.References, r => r.File.EndsWith("SampleApi/ProductService.cs") && r.Line == 20);
+        Assert.DoesNotContain(result.References, r => r.File.EndsWith("SampleApi/OrderService.cs"));
+    }
+
     [Fact]
     public async Task FindReferences_NonexistentSymbol_ReturnsSymbolNotFound()
     {

@@ -253,6 +253,6 @@ public static class DetectAntiPatternsTool
             return compilation.SyntaxTrees;
 
         return compilation.SyntaxTrees.Where(t =>
-            t.FilePath?.Contains(file, StringComparison.OrdinalIgnoreCase) == true);
+            SourcePaths.ContainsPath(t.FilePath, file));
     }
 }

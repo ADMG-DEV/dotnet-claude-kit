@@ -32,6 +32,25 @@ public class GetDiagnosticsTests(TestSolutionFixture fixture) : IClassFixture<Te
         Assert.NotNull(result);
     }
 
+    [Theory]
+    [InlineData("SampleApi/AntiPatternExamples.cs")]
+    [InlineData("SampleApi\\AntiPatternExamples.cs")]
+    public async Task GetDiagnostics_FileScopeWithEitherSeparator_ReportsThatFilesDiagnostics(string path)
+    {
+        // A multi-segment path written with the other platform's separator used to match no
+        // diagnostic, so a broken file reported a clean bill of health. AntiPatternExamples.cs
+        // reliably has errors: the sample does not reference Microsoft.Extensions.Logging.
+        var json = await GetDiagnosticsTool.ExecuteAsync(
+            fixture.WorkspaceManager,
+            scope: "file",
+            path: path,
+            ct: TestContext.Current.CancellationToken);
+        var result = JsonSerializer.Deserialize<DiagnosticsResult>(json)!;
+
+        Assert.True(result.Errors > 0, "Expected the file's errors to be reported");
+        Assert.All(result.Diagnostics, d => Assert.Equal("SampleApi/AntiPatternExamples.cs", d.File));
+    }
+
     [Fact]
     public async Task GetDiagnostics_SeverityFilter_Error_FiltersCorrectly()
     {

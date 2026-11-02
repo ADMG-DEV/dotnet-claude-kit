@@ -48,7 +48,7 @@ public static class GetEndpointMapTool
             if (document.FilePath is null || !seenFiles.Add(document.FilePath))
                 continue;
 
-            if (file is not null && !document.FilePath.Contains(file, StringComparison.OrdinalIgnoreCase))
+            if (file is not null && !SourcePaths.ContainsPath(document.FilePath, file))
                 continue;
 
             var root = await document.GetSyntaxRootAsync(ct);

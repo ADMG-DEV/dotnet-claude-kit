@@ -29,7 +29,7 @@ public static class GetFileOutlineTool
 
         var document = solution.Projects
             .SelectMany(p => p.Documents)
-            .FirstOrDefault(d => d.FilePath?.EndsWith(filePath, StringComparison.OrdinalIgnoreCase) == true);
+            .FirstOrDefault(d => SourcePaths.EndsWithPath(d.FilePath, filePath));
 
         if (document?.FilePath is null)
             return JsonSerializer.Serialize(new ErrorResponse(ErrorCodes.FileNotFound,
