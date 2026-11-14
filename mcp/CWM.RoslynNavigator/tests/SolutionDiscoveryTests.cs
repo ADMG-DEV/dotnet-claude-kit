@@ -143,6 +143,24 @@ public class SolutionDiscoveryTests : IDisposable
         Assert.Equal(slnPath, result);
     }
 
+    [Fact]
+    public void FindConfiguredSolutionPath_ExplicitPathMissing_ReturnsThatPath()
+    {
+        var missing = Path.Combine(_tempRoot, "gone", "Gone.slnx");
+
+        var result = SolutionDiscovery.FindConfiguredSolutionPath(["--solution", missing]);
+
+        Assert.Equal(Path.GetFullPath(missing), result);
+    }
+
+    [Fact]
+    public void FindConfiguredSolutionPath_NoArgsNoSolution_ReturnsNull()
+    {
+        var result = SolutionDiscovery.FindConfiguredSolutionPath([], _tempRoot);
+
+        Assert.Null(result);
+    }
+
     // 10. Explicit --solution file arg — direct return
     [Fact]
     public void FindSolutionPath_ExplicitFileArg_ReturnsDirect()

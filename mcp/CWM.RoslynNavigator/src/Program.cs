@@ -25,14 +25,16 @@ builder.Services.AddMcpServer()
     .WithStdioServerTransport()
     .WithToolsFromAssembly();
 
-// Discover solution path
-var solutionPath = SolutionDiscovery.FindSolutionPath(args);
+// Discover solution path. A --solution path that names no solution is still kept, so it fails
+// to load with its own error rather than letting MCP roots discovery pick a different solution.
+var solutionPath = SolutionDiscovery.FindConfiguredSolutionPath(args);
 WorkspaceInitializer.SolutionPath = solutionPath;
 
 var app = builder.Build();
 
 var workspaceManager = app.Services.GetRequiredService<WorkspaceManager>();
 workspaceManager.Services = app.Services;
+workspaceManager.HasConfiguredSolution = solutionPath is not null;
 
 var logger = app.Services.GetRequiredService<ILogger<Program>>();
 if (solutionPath is not null)

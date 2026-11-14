@@ -43,6 +43,24 @@ internal static class SolutionDiscovery
         return ScanDirectory(directory);
     }
 
+    /// <summary>
+    /// Resolves the solution the server is started with. Like <see cref="FindSolutionPath"/>, except
+    /// that an explicit <c>--solution</c> path is returned in full even when it names no solution, so
+    /// the server reports that path as failing to load instead of finding a different solution.
+    /// </summary>
+    /// <param name="args">Command-line arguments. Supports --solution / -s path.</param>
+    /// <param name="workingDirectory">The directory to scan if no explicit path is provided.</param>
+    /// <returns>The full path to load, or null if no explicit path was given and none was found.</returns>
+    public static string? FindConfiguredSolutionPath(string[] args, string? workingDirectory = null)
+    {
+        var found = FindSolutionPath(args, workingDirectory);
+        if (found is not null)
+            return found;
+
+        var explicitPath = GetExplicitSolutionPath(args);
+        return explicitPath is null ? null : Path.GetFullPath(explicitPath);
+    }
+
     private static string? GetExplicitSolutionPath(string[] args)
     {
         for (var i = 0; i < args.Length - 1; i++)

@@ -57,6 +57,19 @@ public sealed class WorkspaceManager(ILogger<WorkspaceManager> logger, TimeProvi
     internal IServiceProvider? Services { get; set; }
 
     /// <summary>
+    /// True when the solution was configured at startup (<c>--solution</c>, or found in the working
+    /// directory). MCP roots are then never consulted, even before that load has started, while it
+    /// runs, or after it failed: roots discovery is only for a server started without a solution.
+    /// </summary>
+    internal bool HasConfiguredSolution { get; set; }
+
+    /// <summary>
+    /// The directories of the client's MCP roots. Test seam: replaces the roots request to the
+    /// MCP client when set.
+    /// </summary>
+    internal Func<CancellationToken, Task<IReadOnlyList<string>>>? RootsProvider { get; set; }
+
+    /// <summary>
     /// Number of compilations currently cached. Test seam for verifying reload eviction.
     /// </summary>
     internal int CachedCompilationCount => _compilationCache.Count;
@@ -89,6 +102,9 @@ public sealed class WorkspaceManager(ILogger<WorkspaceManager> logger, TimeProvi
 
             // Dispose previous workspace to avoid leaking Roslyn Solution snapshots
             _workspace?.Dispose();
+
+            if (!File.Exists(solutionPath))
+                throw new FileNotFoundException($"Solution file not found: {solutionPath}", solutionPath);
 
             _workspace = MSBuildWorkspace.Create();
             _workspace.RegisterWorkspaceFailedHandler(args =>
@@ -294,8 +310,12 @@ public sealed class WorkspaceManager(ILogger<WorkspaceManager> logger, TimeProvi
             if (State == WorkspaceState.Ready) return null;
         }
 
-        // One-shot attempt to discover workspace from MCP roots
-        if (Interlocked.CompareExchange(ref _rootsAttempted, 1, 0) == 0)
+        // One-shot attempt to discover a workspace from MCP roots, only for a server started
+        // without a solution and only before any load has begun. A call that arrives while a
+        // load is running gets the loading status; it must not replace that load.
+        if (!HasConfiguredSolution
+            && State == WorkspaceState.NotStarted
+            && Interlocked.CompareExchange(ref _rootsAttempted, 1, 0) == 0)
         {
             await TryInitializeFromRootsAsync(ct);
             if (State == WorkspaceState.Ready) return null;
@@ -316,14 +336,11 @@ public sealed class WorkspaceManager(ILogger<WorkspaceManager> logger, TimeProvi
     {
         try
         {
-            var server = Services?.GetService(typeof(McpServer)) as McpServer;
-            if (server is null) return;
+            var roots = await RequestRootDirectoriesAsync(ct);
+            if (roots is null) return;
 
-            var rootsResult = await server.RequestRootsAsync(new ListRootsRequestParams(), ct);
-            foreach (var root in rootsResult.Roots)
+            foreach (var localPath in roots)
             {
-                if (!Uri.TryCreate(root.Uri, UriKind.Absolute, out var uri)) continue;
-                var localPath = uri.LocalPath;
                 if (!Directory.Exists(localPath)) continue;
 
                 var solutionPath = SolutionDiscovery.FindSolutionPath([], localPath);
@@ -341,6 +358,23 @@ public sealed class WorkspaceManager(ILogger<WorkspaceManager> logger, TimeProvi
         {
             logger.LogWarning(ex, "Failed to discover workspace from MCP roots.");
         }
+    }
+
+    private async Task<IReadOnlyList<string>?> RequestRootDirectoriesAsync(CancellationToken ct)
+    {
+        if (RootsProvider is { } provider)
+            return await provider(ct);
+
+        if (Services?.GetService(typeof(McpServer)) is not McpServer server)
+            return null;
+
+        var result = await server.RequestRootsAsync(new ListRootsRequestParams(), ct);
+        return
+        [
+            .. result.Roots
+                .Select(root => Uri.TryCreate(root.Uri, UriKind.Absolute, out var uri) ? uri.LocalPath : null)
+                .OfType<string>()
+        ];
     }
 
     private async Task WarmCompilationsAsync(CancellationToken ct)
