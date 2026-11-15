@@ -609,6 +609,9 @@ public sealed partial class WorkspaceManager(ILogger<WorkspaceManager> logger, T
     /// </summary>
     public Solution? GetSolution() => _solution;
 
+    /// <summary>The solution files of the loaded snapshot, or of the load in progress.</summary>
+    public IReadOnlyList<string> LoadedSolutionPaths => _solutionPaths;
+
     /// <summary>
     /// Root for relative paths: the directory containing the loaded solution file, or — with
     /// several solutions — the deepest directory containing all of them, so every path a tool
@@ -1012,6 +1015,19 @@ public sealed partial class WorkspaceManager(ILogger<WorkspaceManager> logger, T
     internal Func<CancellationToken, Task<IReadOnlyList<string>>>? RootsProvider { get; set; }
 
     /// <summary>
+    /// With <c>--solution-in-root</c>: the solution's path inside a checkout (for example <c>ADMG101.slnx</c>).
+    /// Roots discovery then loads that file from the checkout each MCP root is in, instead of the first
+    /// solution a directory scan finds, so a session started in a worktree gets that worktree's code.
+    /// </summary>
+    internal string? RootSolutionName { get; set; }
+
+    /// <summary>
+    /// With <c>--fallback-solution</c>: loaded when no MCP root is inside a checkout that has
+    /// <see cref="RootSolutionName"/>, or when the client sends no roots.
+    /// </summary>
+    internal string? FallbackSolutionPath { get; set; }
+
+    /// <summary>
     /// Called when the client sends <c>notifications/roots/list_changed</c>. The next tool call
     /// rediscovers solutions from the new roots — unless the solutions were configured
     /// explicitly (<c>--solution</c> or the working directory), which roots never override.
@@ -1053,22 +1069,33 @@ public sealed partial class WorkspaceManager(ILogger<WorkspaceManager> logger, T
         {
             // Typically a client without roots support; only a roots change asks again.
             logger.LogWarning(ex, "Failed to discover workspace from MCP roots.");
-            return;
+            if (FallbackSolutionPath is null) return;
+            roots = [];
         }
 
-        if (roots is null) return;
+        if (roots is null && FallbackSolutionPath is null) return;
 
         var solutionPaths = new List<string>();
-        foreach (var root in roots)
+        foreach (var root in roots ?? [])
         {
             if (!Directory.Exists(root)) continue;
 
-            foreach (var solutionPath in SolutionDiscovery.ScanDirectory(root, DiscoverAllSolutions))
+            IEnumerable<string> found = RootSolutionName is { } name
+                ? SolutionDiscovery.FindNamedSolutionAtOrAbove(root, name) is { } named ? [named] : []
+                : SolutionDiscovery.ScanDirectory(root, DiscoverAllSolutions);
+            foreach (var solutionPath in found)
             {
                 if (solutionPaths.Contains(solutionPath, PathComparison.Comparer)) continue;
                 logger.LogInformation("Discovered solution from MCP roots: {SolutionPath}", solutionPath);
                 solutionPaths.Add(solutionPath);
             }
+        }
+
+        if (solutionPaths.Count == 0 && FallbackSolutionPath is { } fallback)
+        {
+            logger.LogInformation("No MCP root is in a checkout with {Name}; loading the fallback {SolutionPath}",
+                RootSolutionName, fallback);
+            solutionPaths.Add(fallback);
         }
 
         if (solutionPaths.Count == 0)

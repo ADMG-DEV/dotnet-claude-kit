@@ -69,6 +69,35 @@ internal static class SolutionDiscovery
     }
 
     /// <summary>
+    /// The value that follows the first of <paramref name="names"/> in <paramref name="args"/>, or null.
+    /// </summary>
+    public static string? GetOption(string[] args, params string[] names)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (names.Contains(args[i]))
+                return args[i + 1];
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Finds <paramref name="relativePath"/> (for example <c>ADMG101.slnx</c>) in <paramref name="directory"/>
+    /// or the nearest folder above it, so a session started anywhere inside a checkout or worktree gets
+    /// that checkout's solution. Returns null when no folder up to the drive root has it.
+    /// </summary>
+    public static string? FindNamedSolutionAtOrAbove(string directory, string relativePath)
+    {
+        for (var current = new DirectoryInfo(directory); current is not null; current = current.Parent)
+        {
+            var candidate = Path.Combine(current.FullName, relativePath);
+            if (File.Exists(candidate))
+                return Path.GetFullPath(candidate);
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Solutions found under <paramref name="directory"/>: the first one, or every one within the
     /// depth limit when <paramref name="all"/> is set. Used for MCP roots as well as the CLI.
     /// </summary>

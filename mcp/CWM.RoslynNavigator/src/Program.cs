@@ -22,6 +22,7 @@ builder.Logging.AddConsole(options =>
 // Register workspace services
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<WorkspaceManager>();
+builder.Services.AddSingleton<ReviewAudit>();
 builder.Services.AddHostedService<WorkspaceInitializer>();
 
 // Telemetry is opt-in (CWM_ROSLYN_TELEMETRY=on) and never leaves the machine.
@@ -54,6 +55,14 @@ builder.Services.AddMcpServer(options => options.ServerInstructions = ServerInst
     // Done here, once, so no tool's response shape changes and new tools are covered.
     // The same filter leases the current workspace for the call, so a background reload that
     // swaps in a new snapshot meanwhile disposes the old workspace only once the call is done.
+    // With --audit-dir, every call is recorded with the files its answer came from (see ReviewAudit).
+    .AddCallToolFilter(next => async (context, ct) =>
+    {
+        var result = await next(context, ct);
+        if (context.Services?.GetService<ReviewAudit>() is { Directory: not null } audit)
+            await audit.RecordAsync(context.Params, result, ct);
+        return result;
+    })
     .AddCallToolFilter(next => async (context, ct) =>
     {
         var workspace = context.Services?.GetService<WorkspaceManager>();
@@ -111,10 +120,16 @@ builder.Services.AddOptions<McpServerOptions>().Configure<WorkspaceManager>((opt
         })
     ]);
 
+// --solution-in-root <path>: load <path> from the checkout the client's session is in (its MCP roots),
+// or --fallback-solution when the session is in none. The working directory is not scanned: it is where
+// the client started the server, not where the session works.
+var rootSolutionName = SolutionDiscovery.GetOption(args, "--solution-in-root");
+var fallbackSolution = SolutionDiscovery.GetOption(args, "--fallback-solution");
+
 // Discover solution paths: --solution is repeatable, --all-solutions loads every solution found.
 // A --solution path that names no solution is still kept, so it fails to load with its own error
 // rather than letting MCP roots discovery pick a different solution.
-var solutionPaths = SolutionDiscovery.FindConfiguredSolutionPaths(args);
+IReadOnlyList<string> solutionPaths = rootSolutionName is null ? SolutionDiscovery.FindConfiguredSolutionPaths(args) : [];
 WorkspaceInitializer.SolutionPaths = solutionPaths;
 
 var app = builder.Build();
@@ -124,6 +139,11 @@ workspaceManager.Services = app.Services;
 workspaceManager.DiscoverAllSolutions = SolutionDiscovery.IsAllSolutionsMode(args);
 WorkspaceOptions.Apply(args, workspaceManager);
 workspaceManager.HasConfiguredSolutions = solutionPaths.Count > 0;
+workspaceManager.RootSolutionName = rootSolutionName;
+workspaceManager.FallbackSolutionPath = fallbackSolution is null ? null : Path.GetFullPath(fallbackSolution);
+
+var audit = app.Services.GetRequiredService<ReviewAudit>();
+audit.Directory = SolutionDiscovery.GetOption(args, ReviewAudit.Flag) is { } auditDir ? Path.GetFullPath(auditDir) : null;
 
 var logger = app.Services.GetRequiredService<ILogger<Program>>();
 if (workspaceManager.LoadCache is { } loadCache)
@@ -131,7 +151,15 @@ if (workspaceManager.LoadCache is { } loadCache)
 else
     logger.LogInformation("Load cache disabled.");
 
-if (solutionPaths.Count > 0)
+if (audit.Directory is not null)
+    logger.LogInformation("Review audit: {Directory}, session {Session}", audit.Directory, audit.SessionId ?? "(not given)");
+
+if (rootSolutionName is not null)
+{
+    logger.LogInformation("Loads {Name} from the session's checkout on the first tool call (fallback: {Fallback}).",
+        rootSolutionName, workspaceManager.FallbackSolutionPath ?? "none");
+}
+else if (solutionPaths.Count > 0)
 {
     foreach (var solutionPath in solutionPaths)
         logger.LogInformation("Discovered solution: {SolutionPath}", solutionPath);
