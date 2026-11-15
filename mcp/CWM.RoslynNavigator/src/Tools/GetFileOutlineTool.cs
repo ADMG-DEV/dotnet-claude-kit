@@ -12,11 +12,11 @@ public static class GetFileOutlineTool
 {
     private const int MaxNestingDepth = 3;
 
-    [McpServerTool(Name = "get_file_outline"), Description("Get a token-cheap skeleton of one source file: namespace, types, and member signatures with line numbers — no bodies, no usings. Use before reading a file to decide which lines are worth reading. Nested types are included up to 3 levels deep.")]
+    [McpServerTool(Name = "get_file_outline"), Description("Skeleton of one file: namespace, types, and member signatures with line numbers, no bodies. Use before reading a file to pick the lines worth reading.")]
     public static async Task<string> ExecuteAsync(
         WorkspaceManager workspace,
-        [Description("File path (suffix match, e.g. 'OrderService.cs' or 'Services/OrderService.cs')")] string filePath,
-        [Description("Maximum members to return across all types. TotalFound in the response reports the full count; re-query with a higher value if it exceeds Count.")] int maxResults = 200,
+        [Description("Path suffix, e.g. Services/OrderService.cs")] string filePath,
+        [Description("Max members")] int maxResults = 200,
         CancellationToken ct = default)
     {
         var notReady = await workspace.EnsureReadyOrStatusAsync(ct);
@@ -24,20 +24,38 @@ public static class GetFileOutlineTool
 
         var solution = workspace.GetSolution();
         if (solution is null)
-            return JsonSerializer.Serialize(new FileOutlineResult(
+            return ToolJson.Serialize(new FileOutlineResult(
                 "unknown", null, 0, [], 0, 0, false, Math.Max(1, maxResults)));
 
-        var document = solution.Projects
-            .SelectMany(p => p.Documents)
-            .FirstOrDefault(d => SourcePaths.EndsWithPath(d.FilePath, filePath));
+        var matches = DocumentResolver.FindDocuments(solution, filePath);
 
-        if (document?.FilePath is null)
-            return JsonSerializer.Serialize(new ErrorResponse(ErrorCodes.FileNotFound,
+        if (matches.Count == 0)
+            return ToolJson.Serialize(new ErrorResponse(ErrorCodes.FileNotFound,
                 $"File '{filePath}' is not part of any project in the solution."));
+
+        // A multi-targeted project loads once per target framework, so one file can back several
+        // documents. Only distinct paths make a match ambiguous.
+        var distinctPaths = matches
+            .Select(m => m.FilePath!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (distinctPaths.Count > 1)
+            return ToolJson.Serialize(new ErrorResponse(ErrorCodes.AmbiguousMatch,
+                $"'{filePath}' matches {distinctPaths.Count} files. Re-query with a longer path.",
+                distinctPaths.Take(10)
+                    .Select(p =>
+                    {
+                        var relative = workspace.ToRelativePath(p);
+                        return new SymbolCandidate(relative, "file", relative, 1);
+                    })
+                    .ToList()));
+
+        var document = matches[0];
 
         var root = await document.GetSyntaxRootAsync(ct);
         if (root is null)
-            return JsonSerializer.Serialize(new ErrorResponse(ErrorCodes.NoSource,
+            return ToolJson.Serialize(new ErrorResponse(ErrorCodes.NoSource,
                 $"File '{filePath}' has no syntax tree."));
 
         var usingCount = root.DescendantNodes(n => n is CompilationUnitSyntax or BaseNamespaceDeclarationSyntax)
@@ -57,8 +75,8 @@ public static class GetFileOutlineTool
             types.Add(BuildTypeOutline(typeDecl, depth: 1, budget));
         }
 
-        return JsonSerializer.Serialize(new FileOutlineResult(
-            File: workspace.ToRelativePath(document.FilePath),
+        return ToolJson.Serialize(new FileOutlineResult(
+            File: workspace.ToRelativePath(document.FilePath!),
             Namespace: namespaceName,
             UsingCount: usingCount,
             Types: types,

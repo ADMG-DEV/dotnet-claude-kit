@@ -1,0 +1,48 @@
+{
+  "Solution": "SampleSolution.sln",
+  "Projects": [
+    {
+      "Name": "SampleApi",
+      "Path": "SampleApi/SampleApi.csproj",
+      "TargetFrameworks": [
+        "net10.0"
+      ],
+      "References": [
+        "SampleDomain",
+        "SampleInfrastructure"
+      ]
+    },
+    {
+      "Name": "SampleDomain",
+      "Path": "SampleDomain/SampleDomain.csproj",
+      "TargetFrameworks": [
+        "net10.0"
+      ]
+    },
+    {
+      "Name": "SampleInfrastructure",
+      "Path": "SampleInfrastructure/SampleInfrastructure.csproj",
+      "TargetFrameworks": [
+        "net10.0"
+      ],
+      "References": [
+        "SampleDomain"
+      ]
+    },
+    {
+      "Name": "SampleTests",
+      "Path": "SampleTests/SampleTests.csproj",
+      "TargetFrameworks": [
+        "net10.0"
+      ],
+      "References": [
+        "SampleApi",
+        "SampleDomain"
+      ]
+    }
+  ],
+  "Count": 4,
+  "TotalFound": 4,
+  "Truncated": false,
+  "Limit": 500
+}

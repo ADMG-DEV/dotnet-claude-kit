@@ -5,7 +5,8 @@ using CWM.RoslynNavigator.Tools;
 
 namespace CWM.RoslynNavigator.Tests.Tools;
 
-public class ResolveStackTraceTests(TestSolutionFixture fixture) : IClassFixture<TestSolutionFixture>
+[Collection(SampleSolutionCollection.Name)]
+public class ResolveStackTraceTests(TestSolutionFixture fixture)
 {
     /// <summary>
     /// Mirrors what OrderService.CancelOrderAsync actually throws, framed the way the
@@ -20,7 +21,7 @@ public class ResolveStackTraceTests(TestSolutionFixture fixture) : IClassFixture
         """;
 
     [Fact]
-    public async Task ResolveStackTrace_ParsesHeader()
+    public async Task ResolveStackTrace_RealisticTrace_ParsesHeader()
     {
         var json = await ResolveStackTraceTool.ExecuteAsync(
             fixture.WorkspaceManager, RealisticTrace, ct: TestContext.Current.CancellationToken);
@@ -57,7 +58,7 @@ public class ResolveStackTraceTests(TestSolutionFixture fixture) : IClassFixture
     }
 
     [Fact]
-    public async Task ResolveStackTrace_PointsAtTopmostSolutionFrame()
+    public async Task ResolveStackTrace_RealisticTrace_PointsAtTopmostSolutionFrame()
     {
         var json = await ResolveStackTraceTool.ExecuteAsync(
             fixture.WorkspaceManager, RealisticTrace, ct: TestContext.Current.CancellationToken);
@@ -65,6 +66,33 @@ public class ResolveStackTraceTests(TestSolutionFixture fixture) : IClassFixture
 
         Assert.Equal(0, result.FirstSolutionFrame);
         Assert.Equal(2, result.SolutionFrames);
+    }
+
+    [Fact]
+    public async Task ResolveStackTrace_RepeatedFrames_ResolveIndependentlyWithTheirOwnLines()
+    {
+        // The same method appears three times (recursion/retry); symbol lookups are shared,
+        // but each frame keeps its own index and reported line.
+        const string trace = """
+               at SampleApi.OrderService.CancelOrderAsync(Guid id) in /repo/SampleApi/OrderService.cs:line 33
+               at System.Threading.Tasks.Task.Wait()
+               at SampleApi.OrderService.CancelOrderAsync(Guid id)
+               at System.Threading.Tasks.Task.Wait()
+               at SampleApi.OrderService.CancelOrderAsync(Guid id) in /repo/SampleApi/OrderService.cs:line 34
+            """;
+
+        var json = await ResolveStackTraceTool.ExecuteAsync(
+            fixture.WorkspaceManager, trace, ct: TestContext.Current.CancellationToken);
+        var result = JsonSerializer.Deserialize<StackTraceResult>(json)!;
+
+        Assert.Equal([0, 1, 2, 3, 4], result.Frames.Select(f => f.Index));
+        Assert.Equal([true, false, true, false, true], result.Frames.Select(f => f.InSolution));
+        Assert.Equal(33, result.Frames[0].Line);
+        Assert.Equal(result.Frames[2].DeclarationLine, result.Frames[2].Line);
+        Assert.Equal(34, result.Frames[4].Line);
+        Assert.All(
+            result.Frames.Where(f => f.InSolution),
+            f => Assert.Equal("SampleApi/OrderService.cs", f.File));
     }
 
     [Fact]
@@ -94,6 +122,49 @@ public class ResolveStackTraceTests(TestSolutionFixture fixture) : IClassFixture
         Assert.Equal(33, frame.Line);
         Assert.NotEqual(frame.Line, frame.DeclarationLine);
         Assert.Contains("order.Cancel()", frame.Snippet);
+    }
+
+    [Fact]
+    public async Task ResolveStackTrace_NoLineInfo_ReportsCallToNextFrameNotDeclaration()
+    {
+        // A Release trace without PDB lines: "the line" of CancelOrderAsync is its call to
+        // Order.Cancel, the next frame down, not the method signature.
+        const string trace = """
+            System.InvalidOperationException: Order already shipped
+               at SampleDomain.Order.Cancel()
+               at SampleApi.OrderService.CancelOrderAsync(Guid id, CancellationToken ct)
+            """;
+
+        var json = await ResolveStackTraceTool.ExecuteAsync(
+            fixture.WorkspaceManager, trace, ct: TestContext.Current.CancellationToken);
+        var result = JsonSerializer.Deserialize<StackTraceResult>(json)!;
+
+        var top = result.Frames[0];
+        Assert.Equal("declaration", top.LineSource);
+        Assert.Equal(top.DeclarationLine, top.Line);
+
+        var caller = result.Frames[1];
+        Assert.Equal("call", caller.LineSource);
+        Assert.Equal(33, caller.Line);
+        Assert.Equal(29, caller.DeclarationLine);
+        Assert.Contains("order.Cancel()", caller.Snippet);
+    }
+
+    [Fact]
+    public async Task ResolveStackTrace_TraceWithLines_KeepsTraceLine()
+    {
+        const string trace = """
+            System.InvalidOperationException: Order already shipped
+               at SampleDomain.Order.Cancel()
+               at SampleApi.OrderService.CancelOrderAsync(Guid id, CancellationToken ct) in C:\src\SampleApi\OrderService.cs:line 31
+            """;
+
+        var json = await ResolveStackTraceTool.ExecuteAsync(
+            fixture.WorkspaceManager, trace, ct: TestContext.Current.CancellationToken);
+        var caller = JsonSerializer.Deserialize<StackTraceResult>(json)!.Frames[1];
+
+        Assert.Equal("trace", caller.LineSource);
+        Assert.Equal(31, caller.Line);
     }
 
     [Fact]

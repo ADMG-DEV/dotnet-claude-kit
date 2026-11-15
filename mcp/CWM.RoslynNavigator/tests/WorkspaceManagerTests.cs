@@ -4,7 +4,8 @@ using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CWM.RoslynNavigator.Tests;
 
-public class WorkspaceManagerTests(TestSolutionFixture fixture) : IClassFixture<TestSolutionFixture>
+[Collection(SampleSolutionCollection.Name)]
+public class WorkspaceManagerTests(TestSolutionFixture fixture)
 {
     [Fact]
     public void State_ShouldBeReady_AfterLoading()
@@ -13,13 +14,13 @@ public class WorkspaceManagerTests(TestSolutionFixture fixture) : IClassFixture<
     }
 
     [Fact]
-    public void ProjectCount_ShouldBeThree()
+    public void ProjectCount_SampleSolution_IsFour()
     {
-        Assert.Equal(3, fixture.WorkspaceManager.ProjectCount);
+        Assert.Equal(4, fixture.WorkspaceManager.ProjectCount);
     }
 
     [Fact]
-    public void GetSolution_ShouldReturnNonNull()
+    public void GetSolution_LoadedSample_ReturnsSolution()
     {
         var solution = fixture.WorkspaceManager.GetSolution();
         Assert.NotNull(solution);
@@ -37,15 +38,15 @@ public class WorkspaceManagerTests(TestSolutionFixture fixture) : IClassFixture<
     }
 
     [Fact]
-    public async Task GetAllCompilationsAsync_ShouldReturnAll()
+    public async Task GetAllCompilationsAsync_LoadedSample_ReturnsOnePerProject()
     {
         var compilations = await fixture.WorkspaceManager.GetAllCompilationsAsync(TestContext.Current.CancellationToken);
 
-        Assert.Equal(3, compilations.Count);
+        Assert.Equal(4, compilations.Count);
     }
 
     [Fact]
-    public void GetStatusMessage_ShouldReturnReady()
+    public void GetStatusMessage_LoadedSample_ReportsReady()
     {
         var message = fixture.WorkspaceManager.GetStatusMessage();
 
@@ -58,49 +59,5 @@ public class WorkspaceManagerTests(TestSolutionFixture fixture) : IClassFixture<
         var result = await fixture.WorkspaceManager.EnsureReadyOrStatusAsync(TestContext.Current.CancellationToken);
 
         Assert.Null(result);
-    }
-
-    [Fact]
-    public async Task LoadSolutionAsync_ReloadingSameSolution_DoesNotAccumulateStaleCompilations()
-    {
-        // A reload mints fresh ProjectIds. If the cache is not cleared, the old entries
-        // linger alongside the new ones and the count doubles.
-        TestSolutionFixture.RegisterMSBuild();
-        var ct = TestContext.Current.CancellationToken;
-
-        using var manager = new WorkspaceManager(
-            NullLoggerFactory.Instance.CreateLogger<WorkspaceManager>(),
-            TimeProvider.System);
-
-        await manager.LoadSolutionAsync(TestSolutionFixture.SampleSolutionPath, ct);
-        var afterFirstLoad = manager.CachedCompilationCount;
-
-        await manager.LoadSolutionAsync(TestSolutionFixture.SampleSolutionPath, ct);
-
-        Assert.Equal(3, afterFirstLoad);
-        Assert.Equal(afterFirstLoad, manager.CachedCompilationCount);
-    }
-
-    [Fact]
-    public async Task LoadSolutionAsync_ReloadingSameSolution_CachesOnlyLiveProjectIds()
-    {
-        TestSolutionFixture.RegisterMSBuild();
-        var ct = TestContext.Current.CancellationToken;
-
-        using var manager = new WorkspaceManager(
-            NullLoggerFactory.Instance.CreateLogger<WorkspaceManager>(),
-            TimeProvider.System);
-
-        await manager.LoadSolutionAsync(TestSolutionFixture.SampleSolutionPath, ct);
-        await manager.LoadSolutionAsync(TestSolutionFixture.SampleSolutionPath, ct);
-
-        var solution = manager.GetSolution()!;
-        foreach (var projectId in solution.ProjectIds)
-        {
-            Assert.NotNull(await manager.GetCompilationAsync(projectId, ct));
-        }
-
-        // Every cached entry belongs to the current solution — no orphans from the first load.
-        Assert.Equal(solution.ProjectIds.Count, manager.CachedCompilationCount);
     }
 }

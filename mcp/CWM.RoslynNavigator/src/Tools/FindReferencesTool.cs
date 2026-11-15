@@ -13,23 +13,26 @@ namespace CWM.RoslynNavigator.Tools;
 [McpServerToolType]
 public static class FindReferencesTool
 {
-    [McpServerTool(Name = "find_references"), Description("Find all usages of a symbol across the solution. Returns file, line, snippet, and reference kind (usage, inheritance, invocation, instantiation, parameter, type-argument, assignment, implementation). Each result carries IsGenerated so generated call sites can be skipped.")]
+    [McpServerTool(Name = "find_references"), Description("Every usage of a symbol: file, line, snippet, and kind (invocation, instantiation, inheritance, parameter, type-argument, assignment, implementation, usage). For calling methods only, use find_callers.")]
     public static async Task<string> ExecuteAsync(
         WorkspaceManager workspace,
-        [Description("Symbol to find references for. Bare, type-qualified ('OrderService.CreateAsync'), or fully qualified. Qualify when the name is reused across types.")] string symbolName,
-        [Description("Optional: file path to disambiguate (e.g., 'IOrderRepository.cs')")] string? file = null,
-        [Description("Optional: line number to disambiguate")] int? line = null,
-        [Description("Maximum results to return. TotalFound in the response reports the full count; re-query with a higher value if it exceeds Count.")] int maxResults = 50,
+        [Description("Symbol name or SymbolId")] string symbolName,
+        string? file = null,
+        int? line = null,
+        int maxResults = 1000,
+        int? offset = null,
+        string? format = null,
         CancellationToken ct = default)
     {
         var notReady = await workspace.EnsureReadyOrStatusAsync(ct);
         if (notReady is not null) return notReady;
+        if (ListFormat.Validate(format) is { } invalid) return invalid;
 
         var limit = Math.Max(1, maxResults);
 
         var solution = workspace.GetSolution();
         if (solution is null)
-            return JsonSerializer.Serialize(new ReferencesResult([], 0, 0, false, limit));
+            return ToolJson.Serialize(new ReferencesResult([], 0, 0, false, limit));
 
         var resolved = await SymbolResolver.ResolveOrErrorAsync(workspace, symbolName, file, line, ct: ct);
         if (resolved.Failed) return resolved.Error;
@@ -37,48 +40,89 @@ public static class FindReferencesTool
         var symbol = resolved.Symbol;
 
         var references = await SymbolFinder.FindReferencesAsync(symbol, solution, ct);
-        var totalFound = references.Sum(r => r.Locations.Count());
 
+        // One entry per source position. Roslyn reports a location once per project that
+        // compiles the file — every target framework of a multi-targeted project — and once
+        // per cascaded definition, so the raw count overstates the real usages many times.
+        // Positions are collected first (cheap) and snippets built only for the page.
+        var flavors = new TargetFrameworkFlavors(solution);
+        var unique = flavors.Merge(
+            references
+                .SelectMany(r => r.Locations)
+                .Select(l => (Found: new FoundLocation(l, l.Location.SourceTree?.FilePath ?? "", l.Location.SourceSpan.Start, null), (ProjectId?)l.Document.Project.Id)),
+            f => (f.Path, f.Position),
+            (f, tfms) => f with { TargetFrameworks = tfms });
+
+        // A stable order (file, then position) so an offset names the same entry on every
+        // call; Roslyn's own order follows its parallel search.
+        unique = [.. unique.OrderBy(f => f.Path, StringComparer.Ordinal).ThenBy(f => f.Position)];
+
+        var page = Paging.Apply(unique, limit, offset ?? 0);
+        var results = await BuildEntriesAsync(workspace, solution, page.Items, ct);
+        var entries = page.WithItems(results);
+
+        // On a partial page, where the rest lives: counts over the complete result set.
+        var byProject = entries.Truncated || entries.Offset > 0
+            ? ListFormat.CountBy(unique, f => ListFormat.ProjectName(f.Location.Document.Project))
+            : null;
+
+        return ListFormat.Render(
+            entries,
+            format,
+            p => ToolJson.Serialize(new ReferencesResult(
+                p.Items, p.Count, p.TotalFound, p.Truncated, p.Limit, p.Offset, p.NextOffset, ByProject: byProject)),
+            p => ToolJson.Serialize(new ReferencesResult(
+                null, p.Count, p.TotalFound, p.Truncated, p.Limit, p.Offset, p.NextOffset,
+                Files: ListFormat.GroupByFile(p.Items, r => r.File, r => $"{r.Line} {r.Kind}{(r.IsGenerated ? " generated" : "")}"),
+                ByProject: byProject)));
+    }
+
+    /// <summary>Longest snippet kept in a full entry; a minified or generated line can run to kilobytes.</summary>
+    private const int MaxSnippet = 160;
+
+    private static async Task<List<RefLocation>> BuildEntriesAsync(
+        WorkspaceManager workspace, Solution solution, List<FoundLocation> page, CancellationToken ct)
+    {
         var generated = new GeneratedCodeIndex(workspace);
         var textCache = new Dictionary<DocumentId, Microsoft.CodeAnalysis.Text.SourceText>();
-        var results = new List<RefLocation>();
-        var capped = false;
+        var results = new List<RefLocation>(page.Count);
 
-        foreach (var reference in references)
+        foreach (var found in page)
         {
-            foreach (var location in reference.Locations)
+            var location = found.Location;
+            var lineSpan = location.Location.GetLineSpan();
+            var document = solution.GetDocument(location.Document.Id);
+            var snippet = "";
+            if (document is not null)
             {
-                if (results.Count >= limit) { capped = true; break; }
-
-                var lineSpan = location.Location.GetLineSpan();
-                var document = solution.GetDocument(location.Document.Id);
-                var snippet = "";
-                if (document is not null)
+                if (!textCache.TryGetValue(document.Id, out var text))
                 {
-                    if (!textCache.TryGetValue(document.Id, out var text))
-                    {
-                        text = await document.GetTextAsync(ct);
-                        textCache[document.Id] = text;
-                    }
-                    var refLine = text.Lines[lineSpan.StartLinePosition.Line];
-                    snippet = refLine.ToString().Trim();
+                    text = await document.GetTextAsync(ct);
+                    textCache[document.Id] = text;
                 }
-
-                results.Add(new RefLocation(
-                    File: workspace.ToRelativePath(lineSpan.Path),
-                    Line: lineSpan.StartLinePosition.Line + 1,
-                    Snippet: snippet,
-                    Kind: ClassifyReferenceKind(location, ct),
-                    IsGenerated: generated.IsGenerated(location.Location.SourceTree, ct)));
+                var refLine = text.Lines[lineSpan.StartLinePosition.Line];
+                snippet = refLine.ToString().Trim();
+                if (snippet.Length > MaxSnippet)
+                    snippet = snippet[..MaxSnippet] + "…";
             }
-            if (capped) break;
+
+            results.Add(new RefLocation(
+                File: workspace.ToRelativePath(lineSpan.Path),
+                Line: lineSpan.StartLinePosition.Line + 1,
+                Snippet: snippet,
+                Kind: ClassifyReferenceKind(location, ct),
+                IsGenerated: generated.IsGenerated(location.Location.SourceTree, ct),
+                TargetFrameworks: found.TargetFrameworks));
         }
 
-        // Snippets are built lazily as locations stream in, so this tool caps in the loop
-        // rather than via Paging — the contract it reports is identical.
-        return JsonSerializer.Serialize(new ReferencesResult(
-            results, results.Count, totalFound, totalFound > results.Count, limit));
+        return results;
     }
+
+    private sealed record FoundLocation(
+        Microsoft.CodeAnalysis.FindSymbols.ReferenceLocation Location,
+        string Path,
+        int Position,
+        List<string>? TargetFrameworks);
 
     private static string ClassifyReferenceKind(
         Microsoft.CodeAnalysis.FindSymbols.ReferenceLocation location,

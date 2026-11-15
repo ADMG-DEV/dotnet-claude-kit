@@ -9,25 +9,31 @@ namespace CWM.RoslynNavigator.Tools;
 [McpServerToolType]
 public static class DetectCircularDependenciesTool
 {
-    [McpServerTool(Name = "detect_circular_dependencies"), Description("Detect circular dependencies at the project or type level. Finds cycles in project references or type dependencies within a project.")]
+    [McpServerTool(Name = "detect_circular_dependencies"), Description("Find dependency cycles between projects (project references) or between types inside one project.")]
     public static async Task<string> ExecuteAsync(
         WorkspaceManager workspace,
-        [Description("Scope: 'projects' for project-level cycles, 'types' for type-level cycles")] string scope = "projects",
-        [Description("Optional: project name filter (required for 'types' scope)")] string? projectFilter = null,
+        [Description("projects or types")] string scope = "projects",
+        [Description("Project name; required for types")] string? projectFilter = null,
         CancellationToken ct = default)
     {
         var notReady = await workspace.EnsureReadyOrStatusAsync(ct);
         if (notReady is not null) return notReady;
 
+        if (ArgumentChecks.Choice("scope", scope, "projects", "types") is { } invalid)
+            return invalid;
+
         var solution = workspace.GetSolution();
         if (solution is null)
-            return JsonSerializer.Serialize(new CircularDependenciesResult([], 0));
+            return ToolJson.Serialize(new CircularDependenciesResult([], 0));
+
+        if (ArgumentChecks.UnknownProject(solution, projectFilter) is { } unknown)
+            return unknown;
 
         var cycles = scope.ToLowerInvariant() == "types"
             ? await DetectTypeCyclesAsync(workspace, solution, projectFilter, ct)
             : DetectProjectCycles(solution);
 
-        return JsonSerializer.Serialize(new CircularDependenciesResult(cycles, cycles.Count));
+        return ToolJson.Serialize(new CircularDependenciesResult(cycles, cycles.Count));
     }
 
     private static List<CircularDependencyChain> DetectProjectCycles(Solution solution)
@@ -73,7 +79,7 @@ public static class DetectCircularDependenciesTool
                 var semanticModel = compilation.GetSemanticModel(tree);
                 var root = await tree.GetRootAsync(ct);
 
-                foreach (var node in root.DescendantNodes())
+                foreach (var node in DeclarationNodes.Types(root))
                 {
                     var symbol = semanticModel.GetDeclaredSymbol(node, ct);
                     if (symbol is not INamedTypeSymbol typeSymbol) continue;

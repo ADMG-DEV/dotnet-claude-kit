@@ -11,11 +11,11 @@ public static class GetNugetPackagesTool
 {
     private const int MaxPropsSearchDepth = 12;
 
-    [McpServerTool(Name = "get_nuget_packages"), Description("List the NuGet PackageReference inventory per project: package id, version (resolved from the csproj or Directory.Packages.props when central package management is used), and target framework. Reports what is referenced on disk — no network calls, no latest-version lookups.")]
+    [McpServerTool(Name = "get_nuget_packages"), Description("NuGet PackageReference inventory per project: id, version (central package management aware), and target framework. Reads disk only; no latest-version lookup.")]
     public static async Task<string> ExecuteAsync(
         WorkspaceManager workspace,
-        [Description("Optional: project name filter")] string? projectFilter = null,
-        [Description("Maximum package entries to return across all projects. TotalFound in the response reports the full count; re-query with a higher value if it exceeds Count.")] int maxResults = 100,
+        string? projectFilter = null,
+        int maxResults = 100,
         CancellationToken ct = default)
     {
         var notReady = await workspace.EnsureReadyOrStatusAsync(ct);
@@ -23,9 +23,14 @@ public static class GetNugetPackagesTool
 
         var solution = workspace.GetSolution();
         if (solution is null)
-            return JsonSerializer.Serialize(new NugetPackagesResult([], 0, 0, false, Math.Max(1, maxResults)));
+            return ToolJson.Serialize(new NugetPackagesResult([], 0, 0, false, Math.Max(1, maxResults)));
 
         maxResults = Math.Max(1, maxResults);
+
+        if (ArgumentChecks.UnknownProject(solution, projectFilter, p =>
+                p.Name.Equals(projectFilter, StringComparison.OrdinalIgnoreCase)
+                || p.Name.StartsWith(projectFilter + "(", StringComparison.OrdinalIgnoreCase)) is { } unknown)
+            return unknown;
 
         var results = new List<ProjectPackages>();
         var seenProjectFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -63,7 +68,7 @@ public static class GetNugetPackagesTool
 
         // The cap applies to packages across projects, so truncation is measured on the
         // package count rather than the project list this tool returns.
-        return JsonSerializer.Serialize(new NugetPackagesResult(
+        return ToolJson.Serialize(new NugetPackagesResult(
             results, returned, total, total > returned, maxResults));
     }
 

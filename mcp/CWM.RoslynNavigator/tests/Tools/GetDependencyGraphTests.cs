@@ -5,7 +5,8 @@ using CWM.RoslynNavigator.Tools;
 
 namespace CWM.RoslynNavigator.Tests.Tools;
 
-public class GetDependencyGraphTests(TestSolutionFixture fixture) : IClassFixture<TestSolutionFixture>
+[Collection(SampleSolutionCollection.Name)]
+public class GetDependencyGraphTests(TestSolutionFixture fixture)
 {
     [Fact]
     public async Task GetDependencyGraph_ServiceMethod_ReturnsDependencies()
@@ -65,7 +66,7 @@ public class GetDependencyGraphTests(TestSolutionFixture fixture) : IClassFixtur
     }
 
     [Fact]
-    public async Task GetDependencyGraph_DepthClampedTo5()
+    public async Task GetDependencyGraph_DepthAboveFive_IsClampedToFive()
     {
         // Passing depth > 5 should be clamped to 5
         var json = await GetDependencyGraphTool.ExecuteAsync(

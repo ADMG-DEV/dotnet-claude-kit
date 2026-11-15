@@ -10,12 +10,13 @@ namespace CWM.RoslynNavigator.Tools;
 [McpServerToolType]
 public static class FindCallersTool
 {
-    [McpServerTool(Name = "find_callers"), Description("Find all methods that call a specific method. Useful for impact analysis and understanding dependencies. Each caller carries IsGenerated so generated call sites can be skipped.")]
+    [McpServerTool(Name = "find_callers"), Description("Methods that call a method, including calls through an interface or base member it implements or overrides (Via: direct, interface, base, implementation; ViaSymbol is the member called). For what a method calls, use get_dependency_graph.")]
     public static async Task<string> ExecuteAsync(
         WorkspaceManager workspace,
-        [Description("Method to find callers for. Bare, type-qualified ('OrderService.CreateAsync'), or fully qualified. Qualify when the name is reused across types.")] string methodName,
-        [Description("Optional: containing class name to disambiguate")] string? className = null,
-        [Description("Maximum results to return. TotalFound in the response reports the full count; re-query with a higher value if it exceeds Count.")] int maxResults = 50,
+        [Description("Method name or SymbolId")] string methodName,
+        string? className = null,
+        int maxResults = 200,
+        int? offset = null,
         CancellationToken ct = default)
     {
         var notReady = await workspace.EnsureReadyOrStatusAsync(ct);
@@ -26,23 +27,30 @@ public static class FindCallersTool
             return Serialize(Paging.Empty<CallerInfo>(maxResults));
 
         // A className hint is just a qualifier — fold it in rather than resolving twice.
-        var lookupName = className is not null && !methodName.Contains('.')
-            ? $"{className}.{methodName}"
-            : methodName;
+        var lookupName = SymbolResolver.Qualify(methodName, className);
 
         var resolved = await SymbolResolver.ResolveOrErrorAsync(workspace, lookupName, ct: ct);
         if (resolved.Failed) return resolved.Error;
 
         var symbol = resolved.Symbol;
 
-        var callers = await SymbolFinder.FindCallersAsync(symbol, solution, ct);
+        // From every target-framework flavor of the method (see SymbolFlavors).
+        var callers = await SymbolFlavors.SearchAllAsync(symbol, solution,
+            flavor => SymbolFinder.FindCallersAsync(flavor, solution, ct), ct);
 
         var generated = new GeneratedCodeIndex(workspace);
         var all = new List<CallerInfo>();
 
-        foreach (var caller in callers)
+        // Indirect callers bind to a related member (the interface method this one implements,
+        // the base method it overrides, ...) — in DI code that is most of them. Keep them,
+        // labelled, and list direct calls first. One entry per caller and route.
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var caller in callers.OrderBy(c => c.IsDirect ? 0 : 1))
         {
-            if (!caller.IsDirect) continue;
+            var (via, viaSymbol) = CallerDispatch.Classify(symbol, caller);
+            var key = $"{caller.CallingSymbol.ToDisplayString()}|{via}|{viaSymbol}";
+            if (!seen.Add(key)) continue;
 
             var location = SymbolResolver.GetLocation(caller.CallingSymbol);
             if (location.HasValue)
@@ -52,14 +60,23 @@ public static class FindCallersTool
                     ContainingType: caller.CallingSymbol.ContainingType?.Name ?? "unknown",
                     File: workspace.ToRelativePath(location.Value.File),
                     Line: location.Value.Line,
-                    IsGenerated: generated.IsGenerated(caller.CallingSymbol, ct)));
+                    IsGenerated: generated.IsGenerated(caller.CallingSymbol, ct),
+                    Via: via,
+                    ViaSymbol: viaSymbol));
             }
         }
 
-        return Serialize(Paging.Apply(all, maxResults));
+        // Callers are already one per symbol and route; this also folds per-framework copies of
+        // a caller declared in a multi-targeted project whose display strings differ.
+        // Direct callers first, then a stable file/line order so an offset names the same entry every call.
+        var ordered = all
+            .OrderBy(c => c.Via == "direct" ? 0 : 1)
+            .ThenBy(c => c.File, StringComparer.Ordinal)
+            .ThenBy(c => c.Line);
+        return Serialize(Paging.Apply(ordered, maxResults, c => (c.File, c.Line, c.Method, c.Via, c.ViaSymbol), offset ?? 0));
     }
 
     private static string Serialize(Paging.Page<CallerInfo> page) =>
-        JsonSerializer.Serialize(new CallersResult(
-            page.Items, page.Count, page.TotalFound, page.Truncated, page.Limit));
+        Paging.Fit(page, p => ToolJson.Serialize(new CallersResult(
+            p.Items, p.Count, p.TotalFound, p.Truncated, p.Limit, p.Offset, p.NextOffset)));
 }

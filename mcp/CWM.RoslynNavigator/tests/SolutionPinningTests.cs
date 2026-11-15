@@ -35,7 +35,7 @@ public sealed class SolutionPinningTests : IDisposable
             NullLoggerFactory.Instance.CreateLogger<WorkspaceManager>(),
             TimeProvider.System)
         {
-            HasConfiguredSolution = configured,
+            HasConfiguredSolutions = configured,
             RootsProvider = _ =>
             {
                 Interlocked.Increment(ref _rootsRequests);

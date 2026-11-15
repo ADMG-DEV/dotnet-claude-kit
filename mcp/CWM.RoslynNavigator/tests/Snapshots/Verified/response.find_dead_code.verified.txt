@@ -1,0 +1,33 @@
+{
+  "Symbols": [
+    {
+      "Name": "DoNothing",
+      "Kind": "method",
+      "File": "SampleDomain/UnusedHelper.cs",
+      "Line": 9,
+      "ContainingType": "UnusedHelper",
+      "Confidence": "high"
+    },
+    {
+      "Name": "FormatUnused",
+      "Kind": "method",
+      "File": "SampleDomain/UnusedHelper.cs",
+      "Line": 14,
+      "ContainingType": "UnusedHelper",
+      "Confidence": "high"
+    },
+    {
+      "Name": "UnusedHelper",
+      "Kind": "class",
+      "File": "SampleDomain/UnusedHelper.cs",
+      "Line": 7,
+      "Confidence": "high"
+    }
+  ],
+  "Count": 3,
+  "TotalFound": 3,
+  "Truncated": false,
+  "Limit": 50,
+  "ConventionFiltered": 0,
+  "AssemblyScanningDetected": true
+}

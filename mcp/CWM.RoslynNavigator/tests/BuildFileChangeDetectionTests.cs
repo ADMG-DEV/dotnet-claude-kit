@@ -1,6 +1,4 @@
 using CWM.RoslynNavigator.Tests.Fixtures;
-using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Logging.Abstractions;
 
 namespace CWM.RoslynNavigator.Tests;
 
@@ -22,10 +20,9 @@ public sealed class BuildFileChangeDetectionTests : IDisposable
         TestSolutionFixture.RegisterMSBuild();
 
         _root = Path.Combine(Path.GetTempPath(), "cwm-rn-" + Guid.NewGuid().ToString("N"));
-        CopyDirectory(Path.GetDirectoryName(TestSolutionFixture.SampleSolutionPath)!, _root);
+        TestDataCopy.CopyDirectory(Path.GetDirectoryName(TestSolutionFixture.SampleSolutionPath)!, _root);
 
-        _workspace = new WorkspaceManager(
-            NullLoggerFactory.Instance.CreateLogger<WorkspaceManager>(), _clock);
+        _workspace = TestWorkspace.Create(_clock);
     }
 
     private string SolutionPath => Path.Combine(_root, "SampleSolution.sln");
@@ -66,6 +63,7 @@ public sealed class BuildFileChangeDetectionTests : IDisposable
 
         _clock.Advance(PastCooldown);
         await _workspace.RefreshChangedDocumentsAsync(ct);
+        await _workspace.WaitForReloadAsync(); // reloads build the next snapshot in the background
 
         Assert.Equal(loadsAfterInitial + 1, _workspace.LoadCount);
     }
@@ -89,6 +87,7 @@ public sealed class BuildFileChangeDetectionTests : IDisposable
 
         _clock.Advance(PastCooldown);
         await _workspace.RefreshChangedDocumentsAsync(ct);
+        await _workspace.WaitForReloadAsync(); // reloads build the next snapshot in the background
 
         Assert.Equal(loadsAfterInitial + 1, _workspace.LoadCount);
     }
@@ -113,6 +112,7 @@ public sealed class BuildFileChangeDetectionTests : IDisposable
 
         _clock.Advance(PastCooldown);
         await _workspace.RefreshChangedDocumentsAsync(ct);
+        await _workspace.WaitForReloadAsync(); // reloads build the next snapshot in the background
 
         Assert.Equal(loadsAfterInitial + 1, _workspace.LoadCount);
     }
@@ -142,8 +142,10 @@ public sealed class BuildFileChangeDetectionTests : IDisposable
         await _workspace.LoadSolutionAsync(SolutionPath, ct);
         var loadsAfterInitial = _workspace.LoadCount;
 
+        // In a folder no document lives in yet, so only the background walk can find it.
+        Directory.CreateDirectory(Path.Combine(_root, "SampleApi", "Features"));
         await File.WriteAllTextAsync(
-            Path.Combine(_root, "SampleApi", "BrandNewType.cs"),
+            Path.Combine(_root, "SampleApi", "Features", "BrandNewType.cs"),
             "namespace SampleApi;\n\ninternal sealed class BrandNewType;\n",
             ct);
 
@@ -155,11 +157,12 @@ public sealed class BuildFileChangeDetectionTests : IDisposable
 
         await _workspace.WaitForStructuralScanAsync();
 
-        // The next refresh acts on what the completed scan found.
+        // The next refresh acts on what the completed scan found: SampleApi compiles through
+        // the SDK default glob, so the file is added in place rather than by a reload.
         _clock.Advance(PastCooldown);
         await _workspace.RefreshChangedDocumentsAsync(ct);
 
-        Assert.Equal(loadsAfterInitial + 1, _workspace.LoadCount);
+        Assert.Equal(loadsAfterInitial, _workspace.LoadCount);
         Assert.Contains(
             _workspace.GetSolution()!.Projects.SelectMany(p => p.Documents),
             d => d.Name == "BrandNewType.cs");
@@ -206,34 +209,5 @@ public sealed class BuildFileChangeDetectionTests : IDisposable
         {
             // A locked file in a temp copy is not worth failing a test over.
         }
-    }
-
-    private static void CopyDirectory(string source, string destination)
-    {
-        Directory.CreateDirectory(destination);
-
-        // Filter on the path relative to the source root. The source itself sits under the
-        // test output directory, so an absolute-path check for "bin" matches everything.
-        foreach (var file in Directory.GetFiles(source, "*", SearchOption.AllDirectories))
-        {
-            var relative = Path.GetRelativePath(source, file);
-            if (IsBuildOutput(relative)) continue;
-
-            var target = Path.Combine(destination, relative);
-            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-            File.Copy(file, target, overwrite: true);
-        }
-    }
-
-    private static bool IsBuildOutput(string relativePath)
-    {
-        foreach (var segment in relativePath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
-        {
-            if (segment.Equals("bin", StringComparison.OrdinalIgnoreCase)
-                || segment.Equals("obj", StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
-
-        return false;
     }
 }

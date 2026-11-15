@@ -6,6 +6,18 @@
 
 CWM.RoslynNavigator is a Model Context Protocol (MCP) server that provides Claude Code with semantic understanding of .NET solutions. Instead of reading entire source files (hundreds of tokens), Claude can query for specific symbols, references, and type hierarchies (tens of tokens).
 
+We asked Claude Code (Sonnet 5.5) the same 11 everyday questions on five open-source solutions, once with only its built-in Grep, Glob and Read tools and once with this server added. A blinded judge scored every answer from 0 to 100. Across all 55 questions, answers came back 32% faster (734 s → 502 s) with less than half the tool calls (137 → 62), and accuracy went from 61 to 92:
+
+| Solution | Projects | Time, without → with | Accuracy, without → with | Ready, first start → later starts |
+|---|---:|---:|---:|---:|
+| CleanArchitecture | 9 | 112 s → 62 s | 59 → 95 | 3.2 s → 1.3 s |
+| eShop | 28 | 90 s → 64 s | 78 → 95 | 4.5 s → 1.4 s |
+| Jellyfin | 41 | 168 s → 127 s | 70 → 93 | 8.5 s → 1.7–2.2 s |
+| OrchardCore | 257 | 179 s → 133 s | 48 → 91 | 44.4 s → 2.8–3.6 s |
+| ABP Framework | 270 | 186 s → 116 s | 49 → 86 | 47.2 s → 2.4–2.5 s |
+
+Cost dropped 12% overall: less on the small solutions, slightly more on the two largest, where answers are now complete instead of stopping at 50–100 entries. The method and caveats are in the [root README](https://github.com/codewithmukesh/dotnet-claude-kit#benchmarks). Every question and answer is in the [A/B report](https://github.com/codewithmukesh/dotnet-claude-kit/blob/main/mcp/CWM.RoslynNavigator/bench/results/2026-11-04-ab-v2/report.md), and per-tool latency and memory are in the [server benchmark](https://github.com/codewithmukesh/dotnet-claude-kit/blob/main/mcp/CWM.RoslynNavigator/bench/results/2026-11-04-final/report.md).
+
 ## Prerequisites
 
 - .NET 10 SDK
@@ -17,16 +29,16 @@ CWM.RoslynNavigator is a Model Context Protocol (MCP) server that provides Claud
 
 | Tool | Description |
 |------|-------------|
-| `find_symbol` | Find where a type, method, or property is defined |
+| `find_symbol` | Find where a type, method, or property is defined. `match`: `exact` (default), `prefix`, `camelhump`, or `substring` — see [Fuzzy search](#fuzzy-search) |
 | `find_references` | All usages of a symbol across the solution |
 | `find_implementations` | Types that implement an interface or derive from a base class |
-| `find_callers` | All methods that call a specific method |
+| `find_callers` | All methods that call a specific method, including calls through an interface or base member (`Via`: direct / interface / base / implementation, plus `ViaSymbol`) |
 | `find_overrides` | Overrides of a virtual or abstract method |
 | `find_dead_code` | Unused types, methods, and properties |
 | `get_type_hierarchy` | Inheritance chain, interfaces, and derived types |
 | `get_public_api` | Public members of a type without reading the full file |
 | `get_symbol_detail` | Full signature, parameters, return type, and XML docs |
-| `get_project_graph` | Solution project dependency tree |
+| `get_project_graph` | Solution project dependency graph: one entry per csproj (solution-relative path, target frameworks, direct project references); when that is too large for one response, one `Project -> Ref1, Ref2` line per project (see [Result caps](#result-caps-paging-and-the-response-budget)). `summary: true` returns counts, frameworks, folders, dependency layers, and the most-referenced projects; `project: "Name"` returns the matches with `ReferencedBy`. With several solutions loaded, also which solution(s) each project belongs to |
 | `get_dependency_graph` | Call dependency graph for a method |
 | `get_diagnostics` | Compiler and analyzer warnings/errors |
 | `get_test_coverage_map` | Heuristic test coverage by naming convention |
@@ -35,10 +47,16 @@ CWM.RoslynNavigator is a Model Context Protocol (MCP) server that provides Claud
 | `get_symbol_source` | Exact source of one symbol — members in full, types as a signatures-only skeleton (`includeBodies` opt-in), capped by `maxChars` |
 | `get_file_outline` | Skeleton of one file: namespace, types, member signatures with line numbers — no bodies |
 | `get_nuget_packages` | PackageReference inventory per project with versions (CPM-aware, no network calls) |
-| `get_endpoint_map` | ASP.NET Core route inventory: Minimal APIs (MapGroup-composed) + controllers, with auth posture per endpoint |
+| `get_endpoint_map` | ASP.NET Core route inventory: Minimal APIs (MapGroup-composed) + controllers, with auth posture per endpoint. A controller is recognised through its base classes in any file (`class ItemsController : BaseApiController`), inheriting `[Route]` and `[Authorize]` from the nearest base that sets them; each stacked `Http*` attribute is its own endpoint |
 | `get_di_registrations` | DI registration map with duplicate detection and captive-dependency (singleton→scoped) risk flags |
-| `resolve_stack_trace` | Map an exception stack trace onto the solution — undoes async/lambda/local-function rewrites, marks which frames are yours |
-| `analyze_change_impact` | Blast radius of changing one symbol: references by project and file, implementations and overrides that must move with it, transitive callers, risk rating |
+| `resolve_stack_trace` | Map an exception stack trace onto the solution — undoes async/lambda/local-function rewrites, marks which frames are yours. Each frame's `Line` is the line executing in it: the trace's own line when present, else the call to the next frame down (`LineSource`: `trace` / `call` / `declaration`; `CallSites` when the method makes that call more than once) |
+| `analyze_change_impact` | Blast radius of changing one symbol: references by project and file (for a member: calls to it and through the interface/base member it implements, not calls to sibling implementations), implementations and overrides that must move with it, transitive callers (interface/base dispatch included, counted in `IndirectCallers`; the walk is bounded and sets `Truncated` if it stops early), risk rating |
+| `get_token_savings` | Tokens this server has saved in this repository, with a per-tool leaderboard. Opt-in — see [Token savings](#token-savings) |
+| `get_symbol_at` | The symbol at a file position — pass the identifier `text` (or a `column`) on a `line`. Kind, signature, containing type, definition, `SymbolId`, and declared/expression types with nullability |
+| `preview_rename` | What a semantic rename **would** change — per-line old/new text across implementations, overrides and call sites, plus compiler errors it would introduce. Never writes to disk or the workspace — see [Rename preview](#rename-preview) |
+| `get_workspace_status` | What is loaded and how completely: solutions, project/document counts, warm-up progress, snapshot version, and every project that loaded or compiled incompletely — see [Workspace health](#workspace-health) |
+
+Tool definitions are re-sent to the model on every request, so they are kept short: conventions shared by every tool (symbol name forms, file matching, paging fields) are sent once as MCP server instructions, and `ToolDefinitionBudgetTests` fails the build if the definitions grow past about 15 KB (~4k tokens).
 
 ### Symbol names
 
@@ -50,6 +68,19 @@ OrderService.CreateOrderAsync                 # type-qualified
 MyApp.Orders.OrderService.CreateOrderAsync    # fully qualified
 ```
 
+A fourth form names one symbol exactly, overload included — a **SymbolId**, the
+documentation-comment ID that `find_symbol`, `get_symbol_at`, and `AmbiguousMatch`
+candidates return:
+
+```
+M:MyApp.Orders.OrderService.CreateOrderAsync(System.String,System.Threading.CancellationToken)
+T:MyApp.Orders.OrderService
+```
+
+Pass it wherever a name goes; it is resolved centrally, so every symbol-taking tool
+accepts it. The `X:` prefix cannot begin a C# name, so it never collides with one. Roslyn
+may append `~ReturnType` to method IDs; both forms resolve.
+
 Parameter lists, generic arguments, and metadata arity are ignored, so
 `IRepository<Order>.GetByIdAsync(Guid, CancellationToken)` resolves the same as
 `IRepository.GetByIdAsync`. Qualifiers match on segment boundaries — `derService.Get`
@@ -57,7 +88,27 @@ will not match `OrderService.Get`.
 
 When a bare name matches several distinct symbols, tools return an `AmbiguousMatch` error
 listing the candidates rather than silently picking one. Overloads, partial declarations,
-and per-target-framework duplicates count as one symbol, not an ambiguity.
+and per-target-framework duplicates count as one symbol, not an ambiguity. Each candidate's
+`File` and `Line` can be passed straight back as `file`/`line`.
+
+### Fuzzy search
+
+`find_symbol` matches the exact name by default. When you only know part of it, set
+`match`:
+
+| `match` | Finds | Example for `GetByIdAsync` |
+|---------|-------|----------------------------|
+| `exact` | The name itself (case-sensitive) | `GetByIdAsync` |
+| `prefix` | + names starting with the text | `getby` |
+| `camelhump` | + names whose humps start with the query's humps, anchored on the first | `GBIA`, `gbia`, `GetByAsync` |
+| `substring` | + names containing the text anywhere | `IdAsync` |
+
+Each mode includes the tighter ones. Results are ranked exact > prefix > camelhump >
+substring, then types before members, then by project and qualified name, and each
+carries its `Match` tier. A qualifier still matches exactly — `OrderService.Cre` with
+`prefix` finds only `OrderService.CreateOrderAsync`. The search runs as a predicate over
+each project's declaration table (names only, no binding), so it costs about as much as
+an exact lookup.
 
 ### Errors
 
@@ -67,44 +118,253 @@ and has no references".
 
 | Code | Meaning |
 |------|---------|
-| `SymbolNotFound` | No symbol by that name. Check spelling, or search with `find_symbol`. |
+| `SymbolNotFound` | No symbol by that name. `DidYouMean` lists up to five close names (typos, prefixes, camel humps) when there are any. |
 | `AmbiguousMatch` | Several distinct symbols match. `Candidates` lists them; re-query fully qualified, or pass `file`/`line`. |
 | `WrongSymbolKind` | Resolved, but to the wrong kind (e.g. a method where a type was required). |
 | `FileNotFound` | The path is not part of any project in the solution. |
 | `NoSource` | A metadata symbol, or one with no member declaration. |
 | `InvalidArgument` | Malformed input — an empty stack trace, for instance. |
 
-### Result caps
+### Result caps, paging, and the response budget
 
-Every list-returning tool accepts `maxResults` and reports four fields:
+Every list-returning tool accepts `maxResults` and reports these fields:
 
 | Field | Meaning |
 |-------|---------|
 | `Count` | Entries in this response |
 | `TotalFound` | Entries that matched in total |
-| `Truncated` | Whether the cap dropped entries — **the field to branch on** |
-| `Limit` | The cap that was applied; re-query above it to see the rest |
+| `Truncated` | Whether more entries follow — **the field to branch on** |
+| `Limit` | The cap that was applied |
+| `Offset` | Where this page starts (omitted when 0) |
+| `NextOffset` | Pass it back as `offset` for the next page (omitted on the last page) |
 
 `Truncated` is stated rather than inferred from `Count` vs `TotalFound`, which gets the
 boundary case wrong when the result set happens to be exactly the size of the limit.
 
-Defaults: 50 for symbol/list tools (`find_symbol`, `find_references`,
-`find_implementations`, `find_callers`, `find_overrides`, `find_dead_code`,
-`get_public_api`, `get_type_hierarchy`, `get_test_coverage_map`,
-`resolve_stack_trace`, `analyze_change_impact`), 100 for `detect_antipatterns`,
-`get_diagnostics`, `get_endpoint_map`, `get_di_registrations`, `get_nuget_packages`, and
-`get_dependency_graph` nodes, 200 for `get_file_outline` members. `get_symbol_source`
-caps by characters instead (`maxChars`, default 8000, with a `Truncated` flag).
+**Paging.** `find_symbol`, `find_references`, `find_implementations`, `find_callers`,
+`find_overrides`, `find_dead_code`, `get_type_hierarchy`, `get_public_api`,
+`get_project_graph`, `get_diagnostics`, `detect_antipatterns`, `get_endpoint_map`,
+`get_di_registrations`, and `preview_rename` take `offset`. Results are in a stable order
+(by file and line where it has no other meaning), so following `NextOffset` from 0 visits
+every entry exactly once.
+
+**Response budget.** Claude Code saves an MCP result longer than 50,000 characters to a
+file and shows the agent only its path ([docs](https://code.claude.com/docs/en/mcp#mcp-output-limits-and-warnings));
+in the A/B run that is how a 525-reference answer turned into an agent that listed almost
+nothing. Every list tool therefore fits its page to 30,000 characters
+(`ResponseBudget.MaxChars`): when entries do not fit, the page ends early with `Truncated`
+and `NextOffset`, whatever `maxResults` asked for. `get_workspace_status` fits its two lists the same way.
+
+**Compact form.** `find_references`, `get_endpoint_map`, `get_di_registrations`, and
+`get_project_graph` take `format`: `auto` (default), `full`, or `compact`. `auto` returns
+the full entries when the page fits the budget and otherwise switches to a compact form that
+lists far more per call — entries grouped by file as short strings, each path written once:
+
+| Tool | Compact field | Entry |
+|------|---------------|-------|
+| `find_references` | `Files` | `"37 parameter"` (line, kind) |
+| `get_endpoint_map` | `Files` | `"55 GET System/ActivityLog/Entries authorized"` |
+| `get_di_registrations` | `Files` | `"510 singleton IBackupService -> BackupService"` (arrow omitted when the service is its own implementation; `keyed`/`try` appended) |
+| `get_project_graph` | `Edges` | `"~.AdminMenu -> ~.Admin.Abstractions, ~.Navigation.Core"` — direct references; `~` stands for `Prefix` (e.g. `OrchardCore`) when most names share it |
+
+When a page is partial, `ByProject` counts the complete result set per project (top 25, the
+rest folded into one `(N more)` line), so the first call already says where everything is.
+`get_di_registrations` always adds `ByLifetime`, and lists the 25 most-registered
+`Duplicates` with `DuplicateCount` when there are more.
+
+Defaults are sized so the first call usually answers: 1000 for `find_references`; 500 for
+`get_type_hierarchy`, `get_endpoint_map`, `get_di_registrations`, and `get_project_graph`;
+200 for `find_implementations`, `find_callers`, `find_overrides`, and `get_file_outline` members;
+100 for `detect_antipatterns`, `get_diagnostics`, `get_nuget_packages`, and
+`get_dependency_graph` nodes; 50 for the rest (`find_symbol`, `find_dead_code`,
+`get_public_api`, `get_test_coverage_map`, `resolve_stack_trace`, `analyze_change_impact`).
+`get_symbol_source` caps by characters instead (`maxChars`, default 8000, with a `Truncated` flag).
 `get_diagnostics` orders errors first and always includes per-severity totals, so a
 capped response never hides the important picture.
+
+### Response encoding
+
+Every byte of a response is a token the agent pays for. Responses omit null fields and
+`IsGenerated: false`, and write apostrophes and non-ASCII characters as themselves rather
+than `'`-style escapes. A missing optional field means null (or false).
+
+### Multi-targeted projects
+
+MSBuildWorkspace loads a multi-targeted csproj once per target framework, so Roslyn finds
+every source location once per framework. Results are merged by location before counting
+and capping, so `TotalFound` counts distinct locations and a duplicate never uses up
+`maxResults`. `find_symbol` and `find_references` add `TargetFrameworks` to an entry only
+when it exists in some, not all, of its project's frameworks (code under `#if NET8_0`).
+`get_project_graph` lists a multi-targeted csproj once with all its `TargetFrameworks`,
+`analyze_change_impact` counts it once in `AffectedProjects`, and
+`detect_antipatterns`, `get_diagnostics`, and `get_test_coverage_map` count each file once.
+
+Each flavor also has its own symbol for every type, and a consumer derives from the flavor it
+compiles against. `get_type_hierarchy`, `find_implementations`, `find_overrides`, and
+`find_callers` therefore search from the symbol's counterpart in every flavor and merge the
+results. Searching from one flavor only listed 3 of ABP's `AbpModule` subclasses, because
+`Volo.Abp.Core` loads as net9.0 and net10.0 and most modules compile against the other one.
 
 ### Generated code
 
 `find_symbol`, `find_references`, `find_callers`, `find_implementations`, and
-`find_overrides` mark each result with `IsGenerated`, so an agent does not follow a hit
+`find_overrides` mark a result in generated code with `IsGenerated: true` (omitted when
+false), so an agent does not follow a hit
 into a `.g.cs` file that the next build overwrites. Detection uses file conventions
 (`.g.cs`, `.Designer.cs`, `obj/`), an `<auto-generated>` header, and Roslyn's
 `IsImplicitlyDeclared` for compiler-synthesized members.
+
+### Workspace health
+
+MSBuildWorkspace keeps going when a project fails to evaluate, a project reference points
+nowhere, or restore never ran — the solution opens and every tool answers from whatever did
+load. `get_workspace_status` makes that visible. It reports `Healthy` plus, per incomplete
+project, the issues found:
+
+- declared in a solution but not loaded (missing or unloadable project file)
+- a workspace load failure naming the project (e.g. a missing `ProjectReference`)
+- no source documents (only the SDK's `obj/` files)
+- compilation threw, or the core library is unresolved (references missing — run `dotnet restore`)
+- an analyzer or source generator file that does not exist
+
+The last case is common on a fresh clone that was restored but not built: a project that
+references an in-solution analyzer project (`OutputItemType="Analyzer"`) points at a DLL
+that is not there yet. Roslyn cannot index such a reference, and implementation and
+derived-type searches used to fail with `Unexpected value 'UnresolvedAnalyzerReference'`.
+The server now drops those references when it loads (they contribute nothing to a
+compilation anyway) and lists them here, so every tool works on a fresh clone. Build the
+analyzer project to get its generated code.
+
+It also carries the raw `LoadDiagnostics`, background warm-up progress (`WarmUp`:
+`Compiled` of `Total`), `SnapshotVersion`, which increments on every reload or
+in-place document refresh, and `Reloading` / `ReloadReason` / `LastReloadError` for
+background reloads (see [Scaling](#scaling)).
+
+When the workspace is incomplete, any tool result that comes back **empty** — `TotalFound`
+(or `Count`) of 0, or a `SymbolNotFound` / `FileNotFound` error — gains a `WorkspaceWarning`
+property naming the incomplete projects, so "nothing found" is not mistaken for "nothing
+exists". Non-empty results and healthy workspaces are untouched.
+
+### Rename preview
+
+`preview_rename` runs Roslyn's renamer (`Renamer.RenameSymbolAsync`) on the immutable
+`Solution` snapshot and diffs the result. The workspace is never updated and nothing is
+written — the server's tools stay read-only; apply the edits yourself.
+
+| Field | Meaning |
+|-------|---------|
+| `Changes` | One entry per changed line: `File`, `Line`, `Old`, `New` (trimmed), capped by `maxResults` with the usual `Count`/`TotalFound`/`Truncated`/`Limit` |
+| `Files` | Distinct files touched |
+| `Conflicts` | Errors present after the rename but not before (e.g. `CS0111` when the new name duplicates a member), up to 20; `ConflictCount` is the total |
+
+Conflicts are checked where a rename can break things without a full rebuild: semantic
+errors in the changed documents, and declaration errors (duplicate members, clashing type
+names) across the projects that contain them. Roslyn's own conflict-resolution details are
+not public API, so they are not reported separately. `newName` must be a valid C#
+identifier (`@` escapes a keyword); `renameOverloads`, `renameInStrings`, and
+`renameInComments` mirror the IDE options.
+
+## Token savings
+
+This server exists on the premise that a structured symbol query costs far fewer tokens
+than reading and grepping source. `get_token_savings` measures that premise rather than
+asserting it.
+
+**Off by default.** Set `CWM_ROSLYN_TELEMETRY=on` and restart the server to collect.
+
+```bash
+CWM_ROSLYN_TELEMETRY=on cwm-roslyn-navigator --solution MySolution.sln
+```
+
+### What is collected, and where it goes
+
+Nothing is transmitted. There is no network call anywhere in the collection path, no
+identity, and no cross-machine correlation. One line per tool call is appended locally:
+
+```
+%LOCALAPPDATA%/cwm-roslyn-navigator/repos/<hash-of-solution-path>/
+  repo.json     solution path and scale
+  calls.jsonl   {"ts":…,"tool":"find_symbol","ok":true,"results":3,
+                 "respTok":180,"baseTok":4200,"files":3,"ms":42,"state":"ok"}
+```
+
+It lives outside your repository, so there is no `.gitignore` entry to remember and no way
+to commit it by accident. Delete the directory to erase everything. The log rolls at 50 MB.
+
+### How the number is calculated
+
+Savings are a counterfactual — what *would* have been spent — so the method matters more
+than the figure. The baseline is the **file-read floor**: the on-disk size of the source
+files each answer was actually derived from. Without the tool, those files are the minimum
+that would have been read to answer the same question.
+
+Three rules keep it conservative, and all three push the number **down**:
+
+| Rule | Why |
+|------|-----|
+| A file counts **once per session** | Without the tool it would have been read once and stayed in context. Charging it again on every later call is the main way this metric could inflate. |
+| Per-call deduplication | Twenty references in one file is one file to read. |
+| Capped at repository size | No single call can claim to have saved more than the repo contains. |
+
+Errors, zero-result calls, and calls made while the workspace was still loading contribute
+nothing. The baseline also ignores the wrong files a text search would have surfaced first
+and the false positives it would have returned — real costs that are simply not counted.
+The result understates savings, which is the correct direction of error for a public claim.
+
+### Aggregating across repositories
+
+`get_token_savings` answers for the repository in front of you. The `stats` CLI aggregates
+every repository and adds what telemetry alone cannot see — real measured spend and
+adoption rate, both read from Claude Code transcripts:
+
+```bash
+cd mcp/CWM.RoslynNavigator
+dotnet run --project stats/CWM.RoslynNavigator.Stats.csproj              # table
+dotnet run --project stats/CWM.RoslynNavigator.Stats.csproj -- --markdown
+dotnet run --project stats/CWM.RoslynNavigator.Stats.csproj -- --json
+dotnet run --project stats/CWM.RoslynNavigator.Stats.csproj -- --repo myapp
+```
+
+**Adoption rate** is the share of C# navigation that went through the MCP rather than raw
+file reads:
+
+```
+adoption = roslyn_calls / (roslyn_calls + Read/Grep/Glob calls targeting .cs)
+```
+
+Repositories where the server was never used are excluded from the denominator — including
+them would drag the aggregate down for reasons unrelated to the tools. The denominator
+counts only searches that demonstrably targeted C#, so an unfiltered `Grep` is left out;
+that biases adoption **upward**, and the report says so.
+
+Low adoption in a repository where the server *is* configured is usually the more
+actionable finding: it means a tool description is not attracting the work it should.
+
+### The one number that is not measured
+
+`bytesPerToken` is currently **3.5, an uncalibrated estimate**. C# is denser than prose, so
+it sits below the ~4 commonly cited for English, but that value has not been derived from
+measured token counts. Every report says so, and `get_token_savings` returns
+`DivisorCalibrated: false` until it has been.
+
+Calibrating means sampling real `.cs` files, getting exact counts from the Anthropic
+`count_tokens` endpoint, and regressing bytes against tokens. The CLI does this:
+
+```bash
+dotnet run --project stats/CWM.RoslynNavigator.Stats.csproj -- calibrate \
+  --api-key $ANTHROPIC_API_KEY --path /path/to/a/dotnet/repo --sample 200
+```
+
+`count_tokens` is free and returns exact counts, so anyone can reproduce the result and
+check the claim. The run is manual and lives only in this CLI — the MCP server never calls
+it and stays fully offline. Sampling is seeded, so a run can be repeated exactly.
+
+Apply the output to `TokenEstimator` and record the sample size and R² beside the constant.
+A low R² would itself be a finding: it would mean C# token density varies too much for any
+single divisor, and the metric should report a range rather than a point.
+
+**This has not been run yet** — it needs an API key. Until it is, treat the figure as
+indicative rather than precise.
 
 ## Signal Quality
 
@@ -122,9 +382,13 @@ xUnit `[Fact]` is not a defect, so that detector runs on production only.
 `detect_antipatterns` takes `scope`: `production` (default) or `all`. The response
 summary always reports the file counts per kind, so nothing is silently skipped.
 
+To keep the response small, `Rules` states each reported detector's `Severity`, `Message`,
+and `Suggestion` once; a violation carries its own only where it differs from its rule.
+A violation omits `Confidence` when it is `high` and `SourceKind` when it is `production`.
+
 ### Confidence levels
 
-Findings carry `confidence`:
+Findings carry `confidence` (omitted in the response when `high`):
 
 - **`high`** — wrong regardless of context. Safe to grade and to act on directly.
 - **`medium`** — suspicious, but with legitimate uses the detector cannot rule out:
@@ -219,6 +483,14 @@ You can also add it manually to your Claude Code global settings (`~/.claude/set
 }
 ```
 
+Working across several solutions (e.g. microservices)? Repeat `--solution`, or add
+`--all-solutions` — see [Multiple Solutions](#multiple-solutions).
+
+Load tuning, rarely needed: `--load-parallelism N` sets how many MSBuild build hosts load
+the solution side by side (default: automatic; `1` = one host), `--all-target-frameworks`
+keeps every target framework of a multi-targeted project loaded instead of one, and
+`--no-load-cache` turns off the [load cache](#load-cache) — see [Scaling](#scaling).
+
 ### As a Local Tool (per-repo)
 
 ```bash
@@ -286,10 +558,10 @@ dotnet publish src/CWM.RoslynNavigator.csproj -c Release --os linux --arch x64 \
 
 The server resolves the solution file in this order:
 
-1. **Explicit `--solution` argument** — Pass a `.sln`/`.slnx` file path directly, or a directory to scan recursively
+1. **Explicit `--solution` argument** — Pass a `.sln`/`.slnx` file path directly, or a directory to scan recursively. Repeatable — see [Multiple Solutions](#multiple-solutions)
 2. **Working directory scan** — If no argument, scans the current working directory recursively for solution files
-3. **MCP roots discovery** — On the first tool call, if no solution was found at startup, the server requests workspace roots from the MCP host (e.g., Claude Code) and scans those directories. This is a one-shot attempt — if no solution is found, it won't retry. This enables true zero-arg global tool operation.
-4. **Deterministic selection** — Shallowest solution wins (BFS); within the same depth, alphabetical (case-insensitive) ordering is used
+3. **MCP roots discovery** — On the first tool call, if no solution was found at startup, the server requests workspace roots from the MCP host (e.g., Claude Code) and scans those directories, loading a solution from **each** root that has one. If no root has a solution yet, it looks again on a later call after 30 s. When the host sends `notifications/roots/list_changed`, the next call rediscovers; a different set of solutions reloads in the background while the current one keeps answering. Roots never override a solution configured with `--solution` or found in the working directory. This enables true zero-arg global tool operation.
+4. **Deterministic selection** — Shallowest solution wins (BFS); within the same depth, alphabetical (case-insensitive) ordering is used. With `--all-solutions`, every solution found is loaded instead.
 
 ### Recursive Search
 
@@ -297,25 +569,210 @@ Discovery searches up to **3 levels deep** using breadth-first search, so a solu
 
 The following directories are skipped during scanning: `.git`, `.vs`, `.idea`, `node_modules`, `bin`, `obj`, `packages`, `artifacts`, `TestResults`, `.claude`.
 
+## Multiple Solutions
+
+A feature in a microservices codebase often spans several solutions. Instead of registering
+one server per solution, load them all into one:
+
+| Flag | Effect |
+|------|--------|
+| `--solution <path>` / `-s <path>` | Repeatable. Each value is a `.sln`/`.slnx` file, or a directory scanned for its first solution. The first one is the *primary* solution. |
+| `--all-solutions` | Load **every** solution found within the depth limit — in each `--solution` directory, in the working directory when no `--solution` is given, and in each MCP root. |
+
+```bash
+# Explicit list
+cwm-roslyn-navigator --solution services/orders/Orders.sln --solution services/billing/Billing.slnx
+
+# Everything under the repo (up to 3 levels deep)
+cwm-roslyn-navigator --solution . --all-solutions
+```
+
+MCP config for a microservices repo:
+
+```json
+{
+  "mcpServers": {
+    "cwm-roslyn-navigator": {
+      "command": "cwm-roslyn-navigator",
+      "args": ["--solution", "${workspaceFolder}", "--all-solutions"]
+    }
+  }
+}
+```
+
+**How it works — one workspace, many solutions.** The primary solution opens exactly as a
+single solution does. Every further solution contributes only the projects not already
+loaded, so a shared library referenced by five services is loaded and compiled **once**, and
+project references across solution boundaries resolve to that one project. Every tool then
+works across all solutions with no extra parameter: `find_references` on a shared contract
+returns callers from every service.
+
+- **Which solutions are loaded** — `get_project_graph` adds a `Solutions` list (name, path,
+  declared project count, load error if any) and, per project, the solution(s) that declare
+  it. Both fields are omitted when a single solution is loaded, so single-solution output is
+  unchanged.
+- **Paths** — tool results are relative to the deepest directory containing every loaded
+  solution (e.g. `orders/src/OrderService.cs`), so they stay unambiguous across solutions and
+  can be passed straight back to file-addressed tools.
+- **Failures** — a solution file that cannot be read is reported in `Solutions[].Error`; the
+  others still load. A project that fails to load is logged and skipped, as within one solution.
+- **Reloads** — a changed solution file, `.csproj`, or shared build file reloads **all**
+  configured solutions. Shared build files are `Directory.Build.props`/`.targets`,
+  `Directory.Packages.props`, `global.json`, and `NuGet.config` in any directory from each
+  project or solution up to the file-system root — so `src/Directory.Build.props` or one above
+  the solution folder counts, as it does for MSBuild. A new source file is added in place to the project
+  that owns it, in whichever solution; it causes a reload only when that project customizes
+  its compile items (see [Scaling](#scaling)).
+- **Limits** — names must still be unique enough to resolve: if two services both define
+  `OrderService`, qualify it (`Orders.Api.OrderService`), as you would within one solution.
+  `.cwm-navigator.json` is discovered from the common root upward.
+
+**Cost.** Memory and load time scale with the number of *distinct* projects, not solutions —
+shared projects are free after the first. [Scaling](#scaling) applies to the combined
+project count.
+
 ## Architecture
 
 ```
 Program.cs              → MSBuildLocator → Host → MCP stdio transport
-WorkspaceManager.cs     → MSBuildWorkspace lifecycle, file watching, compilation caching
+WorkspaceManager.cs     → MSBuildWorkspace lifecycle, compilation warm-up, on-demand refresh
+DefaultCompileGlob.cs   → Decides when a new .cs file can be added without a reload
 WorkspaceInitializer.cs → BackgroundService triggers workspace load on startup
 SolutionDiscovery.cs    → Auto-detect .sln/.slnx from args or working directory
+SolutionFileReader.cs   → List a solution's projects (multi-solution dedupe and membership)
 SymbolResolver.cs       → Cross-project symbol resolution with disambiguation
-Tools/                  → MCP tool implementations (22 read-only tools)
+Tools/                  → MCP tool implementations (26 read-only tools)
 Responses/              → Token-optimized JSON response DTOs
+Telemetry/              → Opt-in local measurement, behind one call-tool filter
+
+stats/                  → Separate CLI: cross-repo aggregate + divisor calibration
 ```
+
+The Stats CLI deliberately does not reference the server project — it reads JSONL and has
+no business pulling in the Roslyn workspace stack. It mirrors the record type instead, and
+a contract test round-trips a real server record through the mirror so the two cannot drift
+apart silently.
 
 ## Scaling
 
-| Solution Size | Strategy |
-|---|---|
-| Small (1-15 projects) | Load entire workspace on startup, warm compilations in parallel (4 concurrent) |
-| Large (15-50 projects) | Lazy-load compilations on first query per project with LRU cache (30 max) |
-| Enterprise (50+) | Lazy loading + LRU eviction + warn if query touches unloaded project |
+One strategy for every solution size:
+
+- **Ready at open.** Tools answer as soon as the solution(s) are open; until then they
+  return a `Loading` status. On a 39-project solution that is ~13 s after start instead of
+  ~23 s.
+- **Ready in seconds on the next start.** The [load cache](#load-cache) restores the last
+  load's projects instead of running MSBuild again, then checks them with MSBuild in the
+  background. OrchardCore: Ready 58.5 s → 2.8 s; ABP: 99.8 s → 2.4 s.
+- **Several build hosts when the graph allows it.** MSBuildWorkspace evaluates and
+  design-time-builds projects one at a time in a single build host, which is nearly all of
+  the load time on a large solution. When a solution declares 12 or more projects, the
+  server reads the `ProjectReference` graph from the project files and splits the projects
+  into up to 4 groups (one per 4 cores and per 8 GB of memory), each loaded through a
+  solution filter over the real solution by its own build host, then merged so shared
+  projects exist once. Each group also loads its references, so this only pays off when no
+  project references nearly everything: the server estimates the speed-up from the graph and
+  splits only above 1.8×. Measured: eShop ready 7.2 s → 4.5 s, ABP 74 s → 53 s; OrchardCore
+  (whose web host references 228 of its 257 projects) and jellyfin stay on one host. The
+  cost is memory while loading: each build host holds up to ~1 GB until the load ends (ABP
+  with 4 hosts: 4.5 GB for server plus hosts, against 2.1 GB with one). `--load-parallelism N`
+  forces N hosts (`1` turns it off); the server logs a `Load profile` line after every load
+  showing where the time went.
+- **One target framework per project.** MSBuild loads a multi-targeted project once per
+  target framework, so its files are parsed, compiled, held in memory, and found by every
+  search 2-5 times. After a load the server keeps one instance per project — the highest
+  plain `netX.Y` the SDK supports, else .NET with an OS suffix, .NET Core, .NET Standard,
+  .NET Framework, in that order — and drops the others, except an instance a kept project
+  references (a `netstandard2.0`-only consumer keeps the library's `netstandard2.0` build) or
+  one that compiles a source file the primary does not, such as a file behind a conditional
+  `Compile` item (per-framework generated files under `obj/` are ignored for this check);
+  those stay, with a `Secondary target framework kept` load diagnostic saying why.
+  `get_workspace_status` lists the drop as a load diagnostic. The trade-off: code inside
+  `#if` blocks for a dropped framework is not indexed. Measured on ABP: 690 → 271
+  projects, 15,212 → 6,207 documents, warm-up 4.5-5.0 s → 3.2-3.8 s, peak working set at
+  warm-up ~1,025 MB → ~870 MB; on eShop 35 → 28 projects, 1,293 → 673 documents. Ready
+  time is unchanged (every framework is still evaluated; pruning takes ~0.2 s on ABP).
+  Pass `--all-target-frameworks` to keep every instance.
+- **Background warm-up.** Every project then compiles in the background, one build per
+  core, dependencies first. A reload cancels the warm-up of the snapshot it replaces.
+- **Queries never wait in line.** A tool that needs a compilation the warm-up has not
+  reached builds it on demand, concurrently with the others, and shares any build already
+  in flight — Roslyn builds one compilation per project per snapshot.
+- **Edits are incremental.** The Roslyn solution snapshot holds every compilation and forks
+  them on a document edit, including those of projects that reference the edited one.
+- **Changes are found cheaply.** At most every 5 s, a tool call lists each directory that
+  holds documents (one listing instead of one `stat` per file): edited files are re-read,
+  deleted files are removed, and new `.cs` files beside existing ones are picked up. New files
+  in new folders are found by a background walk every 60 s, which never descends into a
+  project's `bin/`/`obj/`, dot-folders, `node_modules`, another project's folder, or a symlink or
+  junction (a link pointing back up the tree would otherwise loop).
+- **New files skip the reload.** A new file is added in place to the project whose folder
+  is its deepest ancestor, when that project compiles through the SDK default glob — no
+  `<Compile Include/Remove>`, default items left on, no unfollowed imports in the project or
+  its `Directory.Build.*` files. Otherwise the solution reloads so MSBuild can decide. Files
+  under `bin/`, `obj/`, or dot-folders are ignored, and a file the project excluded is
+  remembered so it never triggers a second reload.
+- **Reloads never take the workspace offline.** A changed solution, `.csproj`, or shared build
+  file (`Directory.Build.*`, `Directory.Packages.props`, `global.json`, `NuGet.config`, in any
+  folder from a project up to the root) reloads every solution in the background: the next workspace is opened beside the current
+  one while every tool call keeps answering from the last good snapshot, then swapped in
+  atomically. Only the very first load returns `Loading`. Answers given during a reload carry
+  a `WorkspaceWarning` saying they come from the previous snapshot, and
+  `get_workspace_status` reports `Reloading` and the `ReloadReason`. Calls that notice the
+  same change concurrently share one reload; a build file saved again while a reload runs is
+  picked up by the next one. A reload that fails (e.g. an unparseable solution file) keeps the
+  previous snapshot, is reported as `LastReloadError` (and `Healthy: false`), and is retried
+  after 30 s. The replaced workspace is disposed as soon as the last call still using it ends.
+
+### Load cache
+
+Nearly all of a large solution's start is MSBuild evaluating and design-time-building every
+project. What that produces (each project's files, references, and compiler options) rarely
+changes between sessions, so after every MSBuild load the server writes it to a small cache
+entry, and the next start whose build inputs are unchanged rebuilds the solution from it.
+
+| Corpus (projects) | Ready, no cache entry | Ready, cache hit |
+|---|---|---|
+| CleanArchitecture | 4.8 s | 1.3-1.4 s |
+| eShop | 7.5 s | 1.4 s |
+| jellyfin | 10.1 s | 1.7-2.2 s |
+| OrchardCore (257 projects) | 58.5 s | 2.8-3.6 s |
+| ABP framework (271 projects, one build host) | 99.8 s | 2.4-2.5 s |
+
+Process start until tools stop answering `Loading`, measured with the bench `probe` verb on a busy 32 GB machine;
+details in [`bench/results/2026-11-05-load-cache`](bench/results/2026-11-05-load-cache/report.md).
+
+- **Where.** `%LOCALAPPDATA%\cwm-roslyn-navigator\cache` on Windows,
+  `$XDG_CACHE_HOME/cwm-roslyn-navigator` (default `~/.cache/...`) on Linux,
+  `~/Library/Caches/cwm-roslyn-navigator` on macOS. `CWM_ROSLYN_CACHE_DIR` overrides it. One
+  gzipped JSON file per solution set and options, 30-700 KB. Deleting the folder is always safe.
+- **When it is used.** Only when every input still matches: the solution files, every
+  project file, `Directory.Build.props/.targets`, `Directory.Packages.props`, `global.json`
+  and `NuGet.config` in every folder from a project up to the root, any `.props`/`.targets`
+  they import by a literal or `$(MSBuildThisFileDirectory)` path, each project's
+  `project.assets.json` (a restore that changes a package version changes it), the installed
+  .NET SDKs, the navigator build, and `--all-target-frameworks`. Build files are compared by
+  content, so a branch switch that rewrites them unchanged still hits.
+- **Always verified.** A restored snapshot is checked by the real MSBuild load in the
+  background, which takes as long as a cold start. If MSBuild produces the same projects,
+  documents, references, and options, the restored snapshot stays, with every compilation
+  warmed meanwhile. If anything differs (an import through another property, an environment
+  variable, a workload), MSBuild's snapshot is swapped in like any reload. Either way the
+  entry is rewritten. Answers are never flagged as stale during the check, since the inputs matched.
+- **Files changed between sessions.** A document deleted since the entry was written is left
+  out at once. A new file is picked up by the first tool call, exactly like a file created
+  while the server runs.
+- **Never a failure.** A missing, corrupt, or truncated entry is a miss and the server loads
+  with MSBuild. A cache folder that cannot be written is logged and skipped. Entries are
+  written to a temporary file and renamed into place, so two servers on the same solution
+  never read a partial entry.
+- **Cost.** While the check runs, the server holds the restored snapshot and MSBuild's result
+  at once: peak memory is higher than a cold start's (OrchardCore 1.4 GB → 2.1 GB for server
+  plus build host). `--no-load-cache` turns the cache off.
+
+`get_workspace_status` reports it as `LoadCache`: `Source` (`cache` or `msbuild`),
+`Verification` (`running`, `unchanged`, `changed`, `failed`, `superseded`), and `Detail` (why
+the cache was not used, or what changed). The server logs `Load cache hit`, `miss`,
+`verified`, and `written` lines.
 
 ## Troubleshooting
 
@@ -358,6 +815,33 @@ dotnet run --project mcp/CWM.RoslynNavigator/src/CWM.RoslynNavigator.csproj -- -
 ```
 
 ## Changelog
+
+### 0.12.0
+
+- **`CWM.RoslynNavigator.Stats` CLI** — aggregates savings across every repository, with a
+  tool leaderboard, miss rates, and table / `--json` / `--markdown` output.
+- **Transcript mining** — real measured spend and adoption rate read from Claude Code
+  transcripts, so adoption is available even where telemetry was never enabled.
+- **`stats calibrate`** — derives the bytes-per-token divisor from exact `count_tokens`
+  results. Manual and offline-by-default; the server never calls it.
+- The repository join reads `cwd` from transcript line content rather than decoding the
+  directory name, which is lossy — `dotnet-claude-kit` cannot be recovered from
+  `C--Users-...-dotnet-claude-kit`. This was the design's flagged fragile point.
+- Reports distinguish "no data" from "data exists and the server was never invoked".
+
+### 0.11.0
+
+- **New: `get_token_savings`** — measures the premise the server is built on instead of
+  asserting it. Baseline is the on-disk size of the files each answer came from, with
+  session-level deduplication, per-call deduplication, and a repository-size cap, all of
+  which push the figure down. See [Token savings](#token-savings).
+- **Opt-in local telemetry** (`CWM_ROSLYN_TELEMETRY=on`). Nothing is transmitted; records
+  are appended under `%LOCALAPPDATA%` outside the repository. Off by default.
+- Collection hangs off a single MCP call-tool filter rather than a line in each tool, so
+  every tool — including ones added later — is measured with nothing to remember.
+- `get_public_api` and `get_type_hierarchy` now report the type's `File` and `Line`. Useful
+  on its own, and it lets those two tools contribute a baseline like the rest.
+- The bytes-per-token divisor is an uncalibrated estimate and every report says so.
 
 ### 0.10.0
 

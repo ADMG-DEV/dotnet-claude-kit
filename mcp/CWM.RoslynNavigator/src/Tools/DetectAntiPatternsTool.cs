@@ -25,24 +25,33 @@ public static class DetectAntiPatternsTool
         new EfCoreNoTrackingDetector()
     ];
 
-    [McpServerTool(Name = "detect_antipatterns"), Description("Detect .NET anti-patterns in source code using Roslyn analysis. Finds async void, sync-over-async, new HttpClient(), DateTime.Now, broad catch, logging interpolation, missing pragma restore, missing CancellationToken, and EF Core queries without AsNoTracking. Generated code is never reported; test and migration code is excluded by default. Each finding carries a confidence level — grade on 'high' only, treat 'medium' as review items. The 'summary' field gives complete per-detector counts even when the violation list is truncated, so there is no need to sample. Suppression rules can be declared in .cwm-navigator.json or inline with '// cwm:ignore APXXX — reason'.")]
+    [McpServerTool(Name = "detect_antipatterns"), Description("Find .NET anti-patterns: async void, sync-over-async, new HttpClient(), DateTime.Now, broad catch, interpolated logging, missing pragma restore, missing CancellationToken, EF queries without AsNoTracking. Summary counts every finding even when truncated. Confidence is omitted when high; treat medium as review items. Suppress with // cwm:ignore APxxx or .cwm-navigator.json.")]
     public static async Task<string> ExecuteAsync(
         WorkspaceManager workspace,
-        [Description("Filter to file (partial match on file path)")] string? file = null,
-        [Description("Filter to project name")] string? projectFilter = null,
-        [Description("Minimum severity: 'warning' (default) or 'error'")] string severity = "warning",
-        [Description("Maximum results to return")] int maxResults = 100,
-        [Description("Source scope: 'production' (default), or 'all' to include test and migration code")] string scope = "production",
-        [Description("Minimum confidence: 'medium' (default, returns all) or 'high' for graded findings only")] string confidence = "medium",
+        [Description("Path substring filter")] string? file = null,
+        string? projectFilter = null,
+        [Description("Minimum: warning or error")] string severity = "warning",
+        int maxResults = 100,
+        int? offset = null,
+        [Description("production, or all to include test and migration code")] string scope = "production",
+        [Description("Minimum: medium (all) or high")] string confidence = "medium",
         CancellationToken ct = default)
     {
         var notReady = await workspace.EnsureReadyOrStatusAsync(ct);
         if (notReady is not null) return notReady;
 
+        var invalid = ArgumentChecks.Choice("severity", severity, "warning", "error")
+            ?? ArgumentChecks.Choice("scope", scope, "production", "all")
+            ?? ArgumentChecks.Choice("confidence", confidence, "medium", "high");
+        if (invalid is not null) return invalid;
+
         var solution = workspace.GetSolution();
         if (solution is null)
-            return JsonSerializer.Serialize(new AntiPatternsResult(
+            return ToolJson.Serialize(new AntiPatternsResult(
                 [], 0, 0, false, Math.Max(1, maxResults)));
+
+        if (ArgumentChecks.UnknownProject(solution, projectFilter) is { } unknown)
+            return unknown;
 
         var minSeverity = severity.Equals("error", StringComparison.OrdinalIgnoreCase)
             ? AntiPatternSeverity.Error
@@ -56,7 +65,16 @@ public static class DetectAntiPatternsTool
         var suppressions = SuppressionSet.Load(workspace.SolutionDirectory);
 
         var accumulator = new ScanAccumulator();
-        var projects = GetFilteredProjects(solution, projectFilter);
+        var seenFiles = new Dictionary<string, HashSet<(string, int, string, string)>>(StringComparer.OrdinalIgnoreCase);
+        var projects = GetFilteredProjects(solution, projectFilter).ToList();
+
+        // A multi-targeted csproj loads once per framework. A file without preprocessor
+        // directives has the same syntax in every flavor, so it is scanned in one — the
+        // newest framework, whose wider API surface gives the semantic detectors the most to
+        // match (a CancellationToken overload missing from netstandard2.0, say). Files with
+        // #if are scanned in every flavor and merged below.
+        var representative = RepresentativeFlavors(projects);
+        var plan = new List<(Compilation Compilation, SyntaxTree Tree, bool IsTest)>();
 
         foreach (var project in projects)
         {
@@ -66,54 +84,111 @@ public static class DetectAntiPatternsTool
             if (compilation is null)
                 continue;
 
-            var isTestProject = SourceClassifier.IsTestProject(project, compilation);
-            var trees = GetFilteredTrees(compilation, file);
+            var isTestProject = SourceClassifier.IsTestProject(project);
+            var skipPlainFiles = representative.TryGetValue(project.FilePath ?? "", out var chosen) && chosen != project.Id;
 
-            foreach (var tree in trees)
+            foreach (var tree in GetFilteredTrees(compilation, file))
             {
-                ct.ThrowIfCancellationRequested();
-
-                var relativePath = workspace.ToRelativePath(tree.FilePath ?? "");
-                var kind = SourceClassifier.Classify(tree, relativePath, isTestProject, ct);
-                accumulator.CountFile(kind);
-
-                // Generated code is never a finding — nobody hand-wrote it.
-                if (kind == SourceKind.Generated)
+                if (skipPlainFiles && !(await tree.GetRootAsync(ct)).ContainsDirectives)
                     continue;
 
-                if (!includeAllKinds && kind != SourceKind.Production)
-                    continue;
-
-                var applicable = Detectors.Where(d => d.AppliesTo.HasFlag(kind)).ToArray();
-                if (applicable.Length == 0)
-                    continue;
-
-                // One semantic model and one parsed root shared by every detector on this tree.
-                var semanticModel = applicable.Any(d => d.RequiresSemanticModel)
-                    ? compilation.GetSemanticModel(tree)
-                    : null;
-
-                var context = new DetectionContext(tree, semanticModel, kind, ct);
-
-                foreach (var detector in applicable)
-                {
-                    foreach (var violation in detector.Detect(context))
-                    {
-                        if (violation.Severity < minSeverity)
-                            continue;
-
-                        accumulator.Add(
-                            violation,
-                            kind,
-                            workspace.ToRelativePath(violation.File),
-                            suppressions,
-                            context);
-                    }
-                }
+                plan.Add((compilation, tree, isTestProject));
             }
         }
 
-        return JsonSerializer.Serialize(accumulator.Build(maxResults, minConfidence, suppressions));
+        // Every planned tree is scanned in parallel (detectors are stateless; each tree gets
+        // its own DetectionContext), then replayed into the accumulator in plan order so
+        // counts, ordering and truncation match a sequential scan exactly. One pass over all
+        // projects rather than one per project: most projects in a large solution hold a
+        // handful of files, too few to keep the cores busy.
+        var scans = new TreeScan[plan.Count];
+
+        Parallel.For(0, plan.Count, new ParallelOptions { CancellationToken = ct }, index =>
+        {
+            var (compilation, tree, isTestProject) = plan[index];
+            scans[index] = ScanTree(
+                compilation, tree, isTestProject, includeAllKinds, minSeverity, suppressions, workspace, ct);
+        });
+
+        for (var i = 0; i < scans.Length; i++)
+        {
+            // A file scanned in several flavors is counted once and a finding reported once; a
+            // later flavor adds only what the earlier ones did not find (code under #if).
+            var path = plan[i].Tree.FilePath ?? "";
+            var firstSeen = !seenFiles.TryGetValue(path, out var known);
+            if (known is null)
+            {
+                seenFiles[path] = known = [];
+                accumulator.CountFile(scans[i].Kind);
+            }
+
+            foreach (var finding in scans[i].Findings)
+            {
+                var v = finding.Violation;
+                if (known.Add((v.Id, v.Line, v.Message, v.Snippet)) || firstSeen)
+                    accumulator.Add(v, scans[i].Kind, finding.RelativePath, finding.Suppressed);
+            }
+        }
+        var start = Math.Max(0, offset ?? 0);
+        return Paging.FitCount(
+            Math.Max(1, maxResults),
+            limit => ToolJson.Serialize(accumulator.Build(limit, start, minConfidence, suppressions)));
+    }
+
+    private readonly record struct Finding(AntiPatternViolation Violation, string RelativePath, bool Suppressed);
+
+
+    private sealed record TreeScan(SourceKind Kind, List<Finding> Findings);
+
+    private static TreeScan ScanTree(
+        Compilation compilation,
+        SyntaxTree tree,
+        bool isTestProject,
+        bool includeAllKinds,
+        AntiPatternSeverity minSeverity,
+        SuppressionSet suppressions,
+        WorkspaceManager workspace,
+        CancellationToken ct)
+    {
+        var relativePath = workspace.ToRelativePath(tree.FilePath ?? "");
+        var kind = SourceClassifier.Classify(tree, relativePath, isTestProject, ct);
+        var findings = new List<Finding>();
+
+        // Generated code is never a finding — nobody hand-wrote it.
+        if (kind == SourceKind.Generated)
+            return new TreeScan(kind, findings);
+
+        if (!includeAllKinds && kind != SourceKind.Production)
+            return new TreeScan(kind, findings);
+
+        var applicable = Detectors.Where(d => d.AppliesTo.HasFlag(kind)).ToArray();
+        if (applicable.Length == 0)
+            return new TreeScan(kind, findings);
+
+        // One semantic model and one parsed root shared by every detector on this tree.
+        var semanticModel = applicable.Any(d => d.RequiresSemanticModel)
+            ? compilation.GetSemanticModel(tree)
+            : null;
+
+        var context = new DetectionContext(tree, semanticModel, kind, ct);
+
+        foreach (var detector in applicable)
+        {
+            foreach (var violation in detector.Detect(context))
+            {
+                if (violation.Severity < minSeverity)
+                    continue;
+
+                var violationPath = workspace.ToRelativePath(violation.File);
+                var suppressed = suppressions.IsDisabled(violation.Id)
+                    || suppressions.PathSuppressionReason(violation.Id, violationPath) is not null
+                    || context.IsSuppressedAt(violation.Id, violation.Line);
+
+                findings.Add(new Finding(violation, violationPath, suppressed));
+            }
+        }
+
+        return new TreeScan(kind, findings);
     }
 
     /// <summary>
@@ -150,14 +225,9 @@ public static class DetectAntiPatternsTool
             AntiPatternViolation violation,
             SourceKind kind,
             string relativePath,
-            SuppressionSet suppressions,
-            DetectionContext context)
+            bool suppressed)
         {
             var counts = Bucket(violation.Id);
-
-            var suppressed = suppressions.IsDisabled(violation.Id)
-                || suppressions.PathSuppressionReason(violation.Id, relativePath) is not null
-                || context.IsSuppressedAt(violation.Id, violation.Line);
 
             if (suppressed)
             {
@@ -181,6 +251,7 @@ public static class DetectAntiPatternsTool
 
         public AntiPatternsResult Build(
             int maxResults,
+            int offset,
             AntiPatternConfidence minConfidence,
             SuppressionSet suppressions)
         {
@@ -190,25 +261,47 @@ public static class DetectAntiPatternsTool
 
             var limit = Math.Max(1, maxResults);
 
-            var violations = eligible
+            var page = eligible
                 .OrderByDescending(entry => entry.Violation.Confidence)
                 .ThenByDescending(entry => entry.Violation.Severity)
                 .ThenBy(entry => entry.RelativePath, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(entry => entry.Violation.Line)
+                .Skip(offset)
                 .Take(limit)
-                .Select(entry => new AntiPatternInfo(
-                    entry.Violation.Id,
-                    entry.Violation.Severity.ToString().ToLowerInvariant(),
-                    entry.Violation.Message,
-                    entry.RelativePath,
-                    entry.Violation.Line,
-                    entry.Violation.Snippet,
-                    entry.Violation.Suggestion,
-                    entry.Violation.Confidence.ToString().ToLowerInvariant(),
-                    entry.Violation.Member,
-                    entry.Kind.ToString().ToLowerInvariant()))
                 .ToList();
 
+            // Severity, message, and suggestion repeat on every finding of a detector; state the
+            // most common of each once per id and keep a finding's own only where it differs.
+            var rules = page
+                .GroupBy(entry => entry.Violation.Id, StringComparer.Ordinal)
+                .Select(g => new AntiPatternRule(
+                    g.Key,
+                    MostCommon(g.Select(e => SeverityName(e.Violation.Severity))),
+                    MostCommon(g.Select(e => e.Violation.Message)),
+                    MostCommon(g.Select(e => e.Violation.Suggestion))))
+                .OrderBy(r => r.Id, StringComparer.Ordinal)
+                .ToList();
+            var ruleById = rules.ToDictionary(r => r.Id, StringComparer.Ordinal);
+
+            var violations = page
+                .Select(entry =>
+                {
+                    var v = entry.Violation;
+                    var rule = ruleById[v.Id];
+                    var severity = SeverityName(v.Severity);
+                    return new AntiPatternInfo(
+                        v.Id,
+                        entry.RelativePath,
+                        v.Line,
+                        v.Snippet,
+                        v.Member,
+                        Message: v.Message == rule.Message ? null : v.Message,
+                        Suggestion: v.Suggestion == rule.Suggestion ? null : v.Suggestion,
+                        Severity: severity == rule.Severity ? null : severity,
+                        Confidence: v.Confidence == AntiPatternConfidence.High ? null : "medium",
+                        SourceKind: entry.Kind == SourceKind.Production ? null : entry.Kind.ToString().ToLowerInvariant());
+                })
+                .ToList();
             var byId = _byId
                 .Select(pair => new AntiPatternIdSummary(
                     pair.Key,
@@ -232,10 +325,58 @@ public static class DetectAntiPatternsTool
                 MigrationFiles: _migration,
                 SuppressionConfig: suppressions.ConfigPath);
 
+            var start = Math.Min(offset, eligible.Count);
+            var end = start + violations.Count;
             return new AntiPatternsResult(
                 violations, violations.Count, eligible.Count,
-                eligible.Count > violations.Count, limit, summary);
+                end < eligible.Count, limit, summary, rules.Count > 0 ? rules : null,
+                start, end < eligible.Count ? end : null);
         }
+
+        private static string SeverityName(AntiPatternSeverity severity) => severity.ToString().ToLowerInvariant();
+
+        private static string MostCommon(IEnumerable<string> values) =>
+            values.GroupBy(v => v, StringComparer.Ordinal)
+                .OrderByDescending(g => g.Count())
+                .ThenBy(g => g.Key, StringComparer.Ordinal)
+                .First().Key;
+    }
+
+    /// <summary>
+    /// For each multi-targeted csproj among <paramref name="projects"/>, the flavor with the
+    /// newest target framework. Single-target projects are absent.
+    /// </summary>
+    private static Dictionary<string, ProjectId> RepresentativeFlavors(IReadOnlyList<Project> projects) =>
+        projects
+            .Where(p => p.FilePath is not null && GetProjectGraphTool.ExtractTfmFromProjectName(p.Name) is not null)
+            .GroupBy(p => p.FilePath!, StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Count() > 1)
+            .ToDictionary(
+                g => g.Key,
+                g => g.MaxBy(p => FrameworkRank(GetProjectGraphTool.ExtractTfmFromProjectName(p.Name)!))!.Id,
+                StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Orders target frameworks oldest to newest: .NET Framework, .NET Standard, .NET Core,
+    /// then .NET 5+, each by version; an OS-specific flavor (net10.0-android) ranks just
+    /// below its plain framework.
+    /// </summary>
+    internal static (int Family, Version Version, int Plain) FrameworkRank(string tfm)
+    {
+        var dash = tfm.IndexOf('-');
+        var plain = dash < 0 ? 1 : 0;
+        var name = dash < 0 ? tfm : tfm[..dash];
+
+        var (family, digits) = name switch
+        {
+            _ when name.StartsWith("netstandard", StringComparison.OrdinalIgnoreCase) => (1, name["netstandard".Length..]),
+            _ when name.StartsWith("netcoreapp", StringComparison.OrdinalIgnoreCase) => (2, name["netcoreapp".Length..]),
+            _ when name.StartsWith("net", StringComparison.OrdinalIgnoreCase) && name.Contains('.') => (3, name["net".Length..]),
+            _ when name.StartsWith("net", StringComparison.OrdinalIgnoreCase) => (0, string.Join('.', name["net".Length..].ToCharArray())),
+            _ => (-1, "0"),
+        };
+
+        return (family, Version.TryParse(digits.Contains('.') ? digits : digits + ".0", out var version) ? version : new Version(0, 0), plain);
     }
 
     private static IEnumerable<Project> GetFilteredProjects(Solution solution, string? projectFilter)

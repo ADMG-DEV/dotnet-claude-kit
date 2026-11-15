@@ -11,14 +11,14 @@ namespace CWM.RoslynNavigator.Tools;
 [McpServerToolType]
 public static class GetDependencyGraphTool
 {
-    [McpServerTool(Name = "get_dependency_graph"), Description("Get the call dependency graph for a method, showing all methods it calls recursively up to a specified depth. Useful for impact analysis and understanding code flow.")]
+    [McpServerTool(Name = "get_dependency_graph"), Description("What a method calls (callees), recursively to a depth. For who calls it, use find_callers.")]
     public static async Task<string> ExecuteAsync(
         WorkspaceManager workspace,
-        [Description("Method to analyze. Bare, type-qualified ('OrderService.CreateAsync'), or fully qualified.")] string symbolName,
-        [Description("Optional: file path to disambiguate")] string? file = null,
-        [Description("Optional: line number to disambiguate")] int? line = null,
-        [Description("Maximum recursion depth (1-5)")] int depth = 3,
-        [Description("Maximum nodes to return. The response's Truncated flag reports whether the walk was cut short; re-query with a higher value or lower depth for a complete graph.")] int maxResults = 100,
+        [Description("Method name or SymbolId")] string symbolName,
+        string? file = null,
+        int? line = null,
+        [Description("1-5")] int depth = 3,
+        [Description("Max nodes")] int maxResults = 100,
         CancellationToken ct = default)
     {
         var notReady = await workspace.EnsureReadyOrStatusAsync(ct);
@@ -26,7 +26,7 @@ public static class GetDependencyGraphTool
 
         var solution = workspace.GetSolution();
         if (solution is null)
-            return JsonSerializer.Serialize(new DependencyGraphResult("unknown", [], 0, false));
+            return ToolJson.Serialize(new DependencyGraphResult("unknown", [], 0, false));
 
         var resolved = await SymbolResolver.ResolveOrErrorAsync(workspace, symbolName, file, line, ct: ct);
         if (resolved.Failed) return resolved.Error;
@@ -34,7 +34,7 @@ public static class GetDependencyGraphTool
         var symbol = resolved.Symbol;
 
         if (symbol is not IMethodSymbol rootMethod)
-            return JsonSerializer.Serialize(new ErrorResponse(
+            return ToolJson.Serialize(new ErrorResponse(
                 ErrorCodes.WrongSymbolKind,
                 $"'{symbolName}' resolved to a {SymbolResolver.GetKindString(symbol)}, not a method."));
 
@@ -53,7 +53,7 @@ public static class GetDependencyGraphTool
 
         await WalkDependenciesAsync(workspace, rootMethod, 1, depth, visited, dependencies, fileToProject, state, ct);
 
-        return JsonSerializer.Serialize(new DependencyGraphResult(
+        return ToolJson.Serialize(new DependencyGraphResult(
             RootSymbol: rootMethod.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat),
             Dependencies: dependencies,
             TotalNodes: dependencies.Count,

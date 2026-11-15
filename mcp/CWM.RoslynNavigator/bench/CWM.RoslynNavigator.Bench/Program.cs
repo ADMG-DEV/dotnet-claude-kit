@@ -1,0 +1,267 @@
+using System.Diagnostics;
+using CWM.RoslynNavigator.Bench;
+using CWM.RoslynNavigator.Bench.Corpus;
+using CWM.RoslynNavigator.Bench.Reporting;
+using CWM.RoslynNavigator.Bench.Server;
+
+// Black-box benchmark for CWM.RoslynNavigator. See bench/README.md for the method.
+//   select  pick a corpus's targets once and write them into its JSON definition
+//   run     benchmark corpora × server builds; writes JSON per run plus report.md
+//   report  re-render report.md from a results folder
+
+using var cancel = new CancellationTokenSource();
+Console.CancelKeyPress += (_, e) =>
+{
+    e.Cancel = true;
+    cancel.Cancel();
+};
+
+var command = CommandLine.Parse(args);
+
+try
+{
+    return command.Verb switch
+    {
+        "select" => await SelectAsync(command, cancel.Token),
+        "run" => await RunAsync(command, cancel.Token),
+        "report" => Report(command),
+        "probe" => await ProbeAsync(command, cancel.Token),
+        "call" => await CallAsync(command, cancel.Token),
+        _ => Help(),
+    };
+}
+catch (Exception e) when (e is ArgumentException or FileNotFoundException or InvalidOperationException or InvalidDataException)
+{
+    Console.Error.WriteLine($"error: {e.Message}");
+    return 2;
+}
+
+static async Task<int> SelectAsync(CommandLine command, CancellationToken ct)
+{
+    var corpusFile = command.Required("corpus");
+    var corpus = ResultStore.ReadCorpus(corpusFile);
+    var solution = SolutionPath(command.Required("corpus-root"), corpus);
+    var build = ServerBuild.Parse(command.Required("server"));
+
+    Console.WriteLine($"[select {corpus.Name}] starting {build.Label}...");
+    await using var session = await ServerSession.StartAsync(build, solution, ct);
+    _ = await session.WaitForReadyAsync(TimeSpan.FromMinutes(20), ct)
+        ?? throw new InvalidOperationException("Server never became ready.");
+    _ = await session.WaitForWarmAsync(TimeSpan.FromMinutes(20), ct);
+
+    var selector = new TargetSelector(session, SolutionScope.For(solution), Console.Out);
+    var targets = await selector.SelectAsync($"{build.Label} {session.ServerVersion}", ct);
+
+    ResultStore.WriteCorpus(corpusFile, corpus with { Targets = targets });
+    Console.WriteLine($"[select {corpus.Name}] wrote targets to {corpusFile}");
+    return 0;
+}
+
+static async Task<int> RunAsync(CommandLine command, CancellationToken ct)
+{
+    var root = command.Required("corpus-root");
+    var corpora = command.All("corpus").Select(ResultStore.ReadCorpus).ToList();
+    var builds = command.All("server").Select(ServerBuild.Parse).ToList();
+    if (corpora.Count == 0 || builds.Count == 0) throw new ArgumentException("Need at least one --corpus and one --server.");
+
+    var settings = new BenchSettings
+    {
+        WarmIterations = (int)command.Number("warm-iterations", 5),
+        CallTimeout = TimeSpan.FromSeconds(command.Number("timeout-s", 300)),
+        WarmSkipThreshold = TimeSpan.FromSeconds(command.Number("warm-skip-s", 60)),
+        GrepHeadLimit = (int)command.Number("grep-head-limit", 250),
+        PrefillTokensPerSecond = command.Number("prefill-tps", 10000),
+        WarmTimeout = TimeSpan.FromMinutes(command.Number("warm-timeout-min", 20)),
+    };
+
+    var runDate = command.Optional("date") ?? DateTime.UtcNow.ToString("yyyy-MM-dd");
+    var output = Path.Combine(command.Optional("out") ?? "results", runDate);
+    var skipExisting = command.Flag("skip-existing");
+    var runner = new BenchmarkRunner(settings, Console.Out);
+    var total = Stopwatch.StartNew();
+
+    foreach (var corpus in corpora)
+    {
+        var solution = SolutionPath(root, corpus);
+        foreach (var build in builds)
+        {
+            if (skipExisting && File.Exists(Path.Combine(output, ResultStore.RunFileName(corpus.Name, build.Label))))
+            {
+                Console.WriteLine($"[{corpus.Name} × {build.Label}] exists, skipped");
+                continue;
+            }
+
+            var watch = Stopwatch.StartNew();
+            var run = await runner.RunAsync(corpus, root, solution, build, runDate, ct);
+            ResultStore.WriteRun(output, run);
+            Console.WriteLine($"[{corpus.Name} × {build.Label}] done in {watch.Elapsed.TotalMinutes:0.0} min");
+        }
+    }
+
+    WriteReport(output, command.Optional("after"));
+    Console.WriteLine($"All runs done in {total.Elapsed.TotalMinutes:0.0} min → {output}");
+    return 0;
+}
+
+static async Task<int> ProbeAsync(CommandLine command, CancellationToken ct)
+{
+    var corpus = ResultStore.ReadCorpus(command.Required("corpus"));
+    var solution = SolutionPath(command.Required("corpus-root"), corpus);
+    var build = ServerBuild.Parse(command.Required("server"));
+
+    // Server switches worth probing: --load-parallelism N and --no-load-cache.
+    List<string> serverArguments = [];
+    if (command.Optional("load-parallelism") is { } parallelism) serverArguments.AddRange(["--load-parallelism", parallelism]);
+    if (command.Flag("no-load-cache")) serverArguments.Add("--no-load-cache");
+
+    await using var memory = new MemorySampler();
+    await using var session = await ServerSession.StartAsync(build, solution, ct, serverArguments);
+    var ready = await session.WaitForReadyAsync(TimeSpan.FromMinutes(20), ct);
+    var graph = await session.CallAsync("get_project_graph", [], TimeSpan.FromMinutes(2), ct);
+    Console.WriteLine($"server {session.ServerVersion}, ready after {ready?.ToString() ?? "n/a"} ms, tools: {session.ToolNames.Count}");
+    Console.WriteLine(graph.Payload is { Length: > 1500 } p ? p[..1500] + "…" : graph.Payload);
+    foreach (var problem in session.LoadProblems) Console.WriteLine($"load problem: {problem}");
+
+    // --wait-verify: wait for the background MSBuild verification of a cache-restored snapshot
+    // (and for warm-up), so the memory peak covers the whole start.
+    if (command.Flag("wait-verify"))
+    {
+        var warm = await session.WaitForWarmAsync(TimeSpan.FromMinutes(20), ct);
+        string? cache = null;
+        for (var deadline = DateTime.UtcNow.AddMinutes(20); DateTime.UtcNow < deadline; await Task.Delay(500, ct))
+        {
+            var status = await session.CallAsync("get_workspace_status", [], TimeSpan.FromMinutes(2), ct);
+            using var json = System.Text.Json.JsonDocument.Parse(status.Payload ?? "{}");
+            if (!json.RootElement.TryGetProperty("LoadCache", out var loadCache))
+            {
+                cache = "(not reported)";
+                break;
+            }
+
+            cache = loadCache.GetRawText();
+            if (!loadCache.TryGetProperty("Verification", out var verification) || verification.GetString() != "running") break;
+        }
+
+        Console.WriteLine($"warm after {warm?.ToString() ?? "n/a"} ms; verified after {session.ElapsedSinceStartMs} ms; load cache: {cache}");
+        foreach (var note in session.LoadNotes) Console.WriteLine($"note: {note}");
+    }
+
+    var peaks = memory.Snapshot();
+    if (peaks.Supported)
+        Console.WriteLine($"memory: server peak {peaks.ServerPeakBytes / 1048576} MB, build hosts {peaks.BuildHostPeakBytes / 1048576} MB ({peaks.BuildHostProcesses}), combined peak {peaks.CombinedPeakBytes / 1048576} MB");
+    return 0;
+}
+
+// One tool call against a corpus, printing the raw response — for reproducing a bug report.
+// --calls-file runs a JSON array of {"tool": ..., "args": {...}} in one session instead, writing
+// each payload to --out-dir, so one solution load serves a whole before/after comparison.
+static async Task<int> CallAsync(CommandLine command, CancellationToken ct)
+{
+    var corpus = ResultStore.ReadCorpus(command.Required("corpus"));
+    var solution = SolutionPath(command.Required("corpus-root"), corpus);
+    var build = ServerBuild.Parse(command.Required("server")) with
+    {
+        ExtraArguments = command.Optional("server-args")?.Split(' ', StringSplitOptions.RemoveEmptyEntries) ?? [],
+    };
+    var timeout = TimeSpan.FromSeconds(command.Number("timeout-s", 300));
+
+    if (command.Optional("calls-file") is { } callsFile)
+        return await CallManyAsync(command, build, solution, callsFile, timeout, ct);
+
+    var tool = command.Required("tool");
+    var arguments = ParseArguments(command.Optional("args-file") is { } argsFile ? File.ReadAllText(argsFile) : command.Optional("args") ?? "{}");
+
+    await using var session = await ServerSession.StartAsync(build, solution, ct);
+    _ = await session.WaitForReadyAsync(TimeSpan.FromMinutes(20), ct);
+    if (command.Flag("warm")) _ = await session.WaitForWarmAsync(TimeSpan.FromMinutes(20), ct);
+    var result = await session.CallAsync(tool, arguments, timeout, ct);
+    Console.WriteLine($"{tool}: {result.Status} in {result.ElapsedMs:0} ms, {result.Bytes} bytes");
+    // --repeat N: the same call N more times, for warm timings out of process.
+    for (var i = 0; i < (int)command.Number("repeat", 0); i++)
+    {
+        var again = await session.CallAsync(tool, arguments, timeout, ct);
+        Console.WriteLine($"  repeat {i + 1}: {again.Status} in {again.ElapsedMs:0} ms");
+    }
+
+    if (command.Flag("quiet")) return 0;
+    Console.WriteLine(result.Payload ?? result.ErrorMessage);
+    if (!result.Answered)
+    {
+        Console.WriteLine("--- server stderr (tail) ---");
+        foreach (var line in session.StderrTail.TakeLast(60)) Console.WriteLine(line);
+    }
+
+    return 0;
+}
+
+static async Task<int> CallManyAsync(
+    CommandLine command, ServerBuild build, string solution, string callsFile, TimeSpan timeout, CancellationToken ct)
+{
+    var calls = System.Text.Json.JsonDocument.Parse(File.ReadAllText(callsFile)).RootElement.EnumerateArray()
+        .Select(c => (Tool: c.GetProperty("tool").GetString()!,
+                      Args: c.TryGetProperty("args", out var a) ? ParseArguments(a.GetRawText()) : []))
+        .ToList();
+    var outDir = Directory.CreateDirectory(command.Optional("out-dir") ?? ".").FullName;
+
+    await using var session = await ServerSession.StartAsync(build, solution, ct);
+    _ = await session.WaitForReadyAsync(TimeSpan.FromMinutes(20), ct);
+    if (command.Flag("warm")) _ = await session.WaitForWarmAsync(TimeSpan.FromMinutes(20), ct);
+
+    for (var i = 0; i < calls.Count; i++)
+    {
+        var (tool, args) = calls[i];
+        var result = await session.CallAsync(tool, args, timeout, ct);
+        var payload = result.Payload ?? result.ErrorMessage ?? "";
+        File.WriteAllText(Path.Combine(outDir, $"{i:D2}-{tool}.json"), payload);
+        Console.WriteLine($"{i:D2} {tool,-28} {result.Status} {result.ElapsedMs,7:0} ms {payload.Length,8} chars  {System.Text.Json.JsonSerializer.Serialize(args)}");
+    }
+
+    return 0;
+}
+
+static Dictionary<string, object?> ParseArguments(string json) =>
+    System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, System.Text.Json.JsonElement>>(json)!
+        .ToDictionary(a => a.Key, a => (object?)a.Value);
+
+static int Report(CommandLine command)
+{
+    WriteReport(command.Required("in"), command.Optional("after"));
+    return 0;
+}
+
+static void WriteReport(string directory, string? after)
+{
+    var runs = ResultStore.ReadRuns(directory);
+    if (runs.Count == 0) throw new InvalidOperationException($"No run results in {directory}.");
+    var path = Path.Combine(directory, "report.md");
+    File.WriteAllText(path, MarkdownReport.Render(runs, after).ReplaceLineEndings("\n"));
+    Console.WriteLine($"Report: {path}");
+}
+
+static string SolutionPath(string corpusRoot, CorpusDefinition corpus)
+{
+    var path = Path.GetFullPath(Path.Combine(corpusRoot, corpus.CloneDirectory, corpus.Solution));
+    return File.Exists(path) ? path : throw new FileNotFoundException($"Solution not found: {path}", path);
+}
+
+static int Help()
+{
+    Console.WriteLine("""
+        CWM.RoslynNavigator.Bench — black-box benchmark over MCP stdio
+
+          select --corpus <def.json> --corpus-root <dir> --server <label=path>
+          run    --corpus-root <dir> --corpus <def.json>... --server <label=path>...
+                 [--out results] [--date yyyy-MM-dd] [--warm-iterations 5] [--timeout-s 300]
+                 [--warm-skip-s 60] [--warm-timeout-min 20] [--grep-head-limit 250] [--prefill-tps 10000]
+                 [--after <label>] [--skip-existing]
+          report --in <results/yyyy-MM-dd> [--after <label>]
+          probe  --corpus <def.json> --corpus-root <dir> --server <label=path>
+                 [--load-parallelism N] [--no-load-cache] [--wait-verify]
+          call   --corpus <def.json> --corpus-root <dir> --server <label=path> --tool <name>
+                 [--args <json> | --args-file <file>] [--warm] [--repeat N] [--quiet] [--timeout-s 300]
+                 [--calls-file <json array of {tool,args}> --out-dir <dir>] [--server-args "<switches>"]
+
+        A server path ending in .dll runs under the dotnet host; anything else runs directly.
+        """);
+    return 1;
+}

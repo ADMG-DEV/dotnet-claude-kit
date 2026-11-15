@@ -5,7 +5,8 @@ using CWM.RoslynNavigator.Tools;
 
 namespace CWM.RoslynNavigator.Tests.Tools;
 
-public class GetPublicApiTests(TestSolutionFixture fixture) : IClassFixture<TestSolutionFixture>
+[Collection(SampleSolutionCollection.Name)]
+public class GetPublicApiTests(TestSolutionFixture fixture)
 {
     [Fact]
     public async Task GetPublicApi_Interface_ReturnsAllMembers()
@@ -33,7 +34,7 @@ public class GetPublicApiTests(TestSolutionFixture fixture) : IClassFixture<Test
     }
 
     [Fact]
-    public async Task GetPublicApi_ExcludesPrivateMembers()
+    public async Task GetPublicApi_TypeWithPrivateConstructor_ExcludesPrivateMembers()
     {
         var json = await GetPublicApiTool.ExecuteAsync(fixture.WorkspaceManager, "Order", ct: TestContext.Current.CancellationToken);
         var result = JsonSerializer.Deserialize<PublicApiResult>(json)!;

@@ -14,15 +14,15 @@ public static class GetSymbolSourceTool
     private const int MinChars = 200;
     private const int MaxChars = 20_000;
 
-    [McpServerTool(Name = "get_symbol_source"), Description("Get the exact source of ONE symbol without reading the whole file. Members (methods, properties) return their full source including doc comment and attributes. Types return a signatures-only skeleton unless includeBodies is set. Output is capped by maxChars with a Truncated flag. Accepts dotted names like 'OrderService.GetOrderAsync'.")]
+    [McpServerTool(Name = "get_symbol_source"), Description("Exact source of one symbol without reading the file: a member in full with docs and attributes; a type as a signatures-only skeleton unless includeBodies. Capped by maxChars.")]
     public static async Task<string> ExecuteAsync(
         WorkspaceManager workspace,
-        [Description("The symbol name. Dotted form 'ContainingType.Member' disambiguates members.")] string symbolName,
-        [Description("Optional: containing type name for methods/properties")] string? containingType = null,
-        [Description("Optional: file path to disambiguate")] string? file = null,
-        [Description("Optional: line number to disambiguate")] int? line = null,
-        [Description("For types only: include full member bodies instead of the signatures-only skeleton")] bool includeBodies = false,
-        [Description("Maximum characters of source to return (200-20000)")] int maxChars = 8000,
+        [Description("Name, Type.Member, or SymbolId")] string symbolName,
+        string? containingType = null,
+        string? file = null,
+        int? line = null,
+        [Description("Types only: include member bodies")] bool includeBodies = false,
+        [Description("200-20000")] int maxChars = 8000,
         CancellationToken ct = default)
     {
         var notReady = await workspace.EnsureReadyOrStatusAsync(ct);
@@ -31,9 +31,7 @@ public static class GetSymbolSourceTool
         // Qualified names resolve natively in SymbolResolver. An explicit containingType
         // argument is folded into the same qualified form, and only falls back to the bare
         // name when that yields nothing (e.g. symbolName is itself the type).
-        var lookupName = containingType is not null && !symbolName.Contains('.')
-            ? $"{containingType}.{symbolName}"
-            : symbolName;
+        var lookupName = SymbolResolver.Qualify(symbolName, containingType);
 
         var resolved = await SymbolResolver.ResolveOrErrorAsync(workspace, lookupName, file, line, ct: ct);
         if (resolved.Failed) return resolved.Error;
@@ -42,12 +40,12 @@ public static class GetSymbolSourceTool
 
         var syntaxRef = symbol.DeclaringSyntaxReferences.FirstOrDefault();
         if (syntaxRef is null)
-            return JsonSerializer.Serialize(new ErrorResponse(ErrorCodes.NoSource,
+            return ToolJson.Serialize(new ErrorResponse(ErrorCodes.NoSource,
                 $"'{symbolName}' has no source in this solution (metadata symbol)."));
 
         var node = (await syntaxRef.GetSyntaxAsync(ct)).FirstAncestorOrSelf<MemberDeclarationSyntax>();
         if (node is null)
-            return JsonSerializer.Serialize(new ErrorResponse(ErrorCodes.NoSource,
+            return ToolJson.Serialize(new ErrorResponse(ErrorCodes.NoSource,
                 $"'{symbolName}' does not map to a member declaration."));
 
         maxChars = Math.Clamp(maxChars, MinChars, MaxChars);
@@ -63,7 +61,7 @@ public static class GetSymbolSourceTool
         var lineSpan = node.GetLocation().GetLineSpan();
         var filePath = node.SyntaxTree.FilePath is { } p ? workspace.ToRelativePath(p) : "unknown";
 
-        return JsonSerializer.Serialize(new SymbolSourceResult(
+        return ToolJson.Serialize(new SymbolSourceResult(
             Name: symbol.Name,
             Kind: SymbolResolver.GetKindString(symbol),
             File: filePath,

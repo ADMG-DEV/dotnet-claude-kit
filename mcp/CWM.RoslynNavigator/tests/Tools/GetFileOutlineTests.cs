@@ -5,10 +5,11 @@ using CWM.RoslynNavigator.Tools;
 
 namespace CWM.RoslynNavigator.Tests.Tools;
 
-public class GetFileOutlineTests(TestSolutionFixture fixture) : IClassFixture<TestSolutionFixture>
+[Collection(SampleSolutionCollection.Name)]
+public class GetFileOutlineTests(TestSolutionFixture fixture)
 {
     [Fact]
-    public async Task GetFileOutline_ReturnsNamespaceUsingsAndTypeSkeleton()
+    public async Task GetFileOutline_SourceFile_ReturnsNamespaceUsingsAndTypeSkeleton()
     {
         var json = await GetFileOutlineTool.ExecuteAsync(
             fixture.WorkspaceManager, "OrderService.cs", ct: TestContext.Current.CancellationToken);
@@ -52,6 +53,18 @@ public class GetFileOutlineTests(TestSolutionFixture fixture) : IClassFixture<Te
 
         Assert.Equal(1, result.Count);
         Assert.True(result.TotalFound > 1);
+    }
+
+    [Theory]
+    [InlineData("./SampleApi/OrderService.cs")]
+    [InlineData(".\\SampleApi\\OrderService.cs")]
+    public async Task GetFileOutline_DotSlashAndBackslashPaths_Resolve(string path)
+    {
+        var json = await GetFileOutlineTool.ExecuteAsync(
+            fixture.WorkspaceManager, path, ct: TestContext.Current.CancellationToken);
+        var result = JsonSerializer.Deserialize<FileOutlineResult>(json)!;
+
+        Assert.Equal("SampleApi/OrderService.cs", result.File);
     }
 
     [Fact]

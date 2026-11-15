@@ -1,0 +1,685 @@
+[
+  {
+    "name": "analyze_change_impact",
+    "description": "Blast radius of changing one symbol: references by project and file, tests, implementations and overrides that must change too, transitive callers (through interface or base members too), and a risk rating. Use before renaming, changing a signature, or deleting.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "symbolName": {
+          "description": "Symbol name or SymbolId",
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "depth": {
+          "description": "Caller levels to walk, 1-5",
+          "type": "integer",
+          "default": 2
+        },
+        "maxResults": {
+          "description": "Cap per list",
+          "type": "integer",
+          "default": 50
+        }
+      },
+      "required": [
+        "symbolName"
+      ]
+    }
+  },
+  {
+    "name": "detect_antipatterns",
+    "description": "Find .NET anti-patterns: async void, sync-over-async, new HttpClient(), DateTime.Now, broad catch, interpolated logging, missing pragma restore, missing CancellationToken, EF queries without AsNoTracking. Summary counts every finding even when truncated. Confidence is omitted when high; treat medium as review items. Suppress with // cwm:ignore APxxx or .cwm-navigator.json.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "Path substring filter",
+          "type": "string"
+        },
+        "projectFilter": {
+          "type": "string"
+        },
+        "severity": {
+          "description": "Minimum: warning or error",
+          "type": "string",
+          "default": "warning"
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 100
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "scope": {
+          "description": "production, or all to include test and migration code",
+          "type": "string",
+          "default": "production"
+        },
+        "confidence": {
+          "description": "Minimum: medium (all) or high",
+          "type": "string",
+          "default": "medium"
+        }
+      }
+    }
+  },
+  {
+    "name": "detect_circular_dependencies",
+    "description": "Find dependency cycles between projects (project references) or between types inside one project.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "description": "projects or types",
+          "type": "string",
+          "default": "projects"
+        },
+        "projectFilter": {
+          "description": "Project name; required for types",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "find_callers",
+    "description": "Methods that call a method, including calls through an interface or base member it implements or overrides (Via: direct, interface, base, implementation; ViaSymbol is the member called). For what a method calls, use get_dependency_graph.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "methodName": {
+          "description": "Method name or SymbolId",
+          "type": "string"
+        },
+        "className": {
+          "type": "string"
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 200
+        },
+        "offset": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "methodName"
+      ]
+    }
+  },
+  {
+    "name": "find_dead_code",
+    "description": "Unused types, methods, and properties, skipping public entry points, interface implementations, overrides, and convention-discovered types (EF configurations, hosted services, migrations). Confidence high is safe to delete; medium matches a convention suffix; low appears in a string (likely reflection). AssemblyScanningDetected weakens all results.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "description": "file, project, or solution",
+          "type": "string",
+          "default": "solution"
+        },
+        "path": {
+          "description": "File path or project name for that scope",
+          "type": "string"
+        },
+        "kind": {
+          "description": "type, method, property, or all",
+          "type": "string",
+          "default": "all"
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 50
+        },
+        "offset": {
+          "type": "integer"
+        }
+      }
+    }
+  },
+  {
+    "name": "find_implementations",
+    "description": "Types that implement an interface or derive from a base class. For base types and interfaces too, use get_type_hierarchy.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "interfaceName": {
+          "description": "Interface or base class name, or SymbolId",
+          "type": "string"
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 200
+        },
+        "offset": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "interfaceName"
+      ]
+    }
+  },
+  {
+    "name": "find_overrides",
+    "description": "Overrides of a virtual or abstract method across the solution.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "methodName": {
+          "description": "Method name or SymbolId",
+          "type": "string"
+        },
+        "className": {
+          "type": "string"
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 200
+        },
+        "offset": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "methodName"
+      ]
+    }
+  },
+  {
+    "name": "find_references",
+    "description": "Every usage of a symbol: file, line, snippet, and kind (invocation, instantiation, inheritance, parameter, type-argument, assignment, implementation, usage). For calling methods only, use find_callers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "symbolName": {
+          "description": "Symbol name or SymbolId",
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 1000
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "format": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbolName"
+      ]
+    }
+  },
+  {
+    "name": "find_symbol",
+    "description": "Locate where a type or member is declared: file, line, kind, namespace, containing type, and a SymbolId for other tools. Exact name by default; set match for partial names.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Name, Type.Member, fully qualified name, or SymbolId. With a fuzzy match only the last segment is fuzzy.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "any, type, class, interface, struct, enum, record, method, property, or field",
+          "type": "string",
+          "default": "any"
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 50
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "match": {
+          "description": "exact (case-sensitive), prefix, camelhump (GBIA finds GetByIdAsync), or substring. Fuzzy modes ignore case and rank tighter matches first.",
+          "type": "string",
+          "default": "exact"
+        }
+      },
+      "required": [
+        "name"
+      ]
+    }
+  },
+  {
+    "name": "get_dependency_graph",
+    "description": "What a method calls (callees), recursively to a depth. For who calls it, use find_callers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "symbolName": {
+          "description": "Method name or SymbolId",
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "depth": {
+          "description": "1-5",
+          "type": "integer",
+          "default": 3
+        },
+        "maxResults": {
+          "description": "Max nodes",
+          "type": "integer",
+          "default": 100
+        }
+      },
+      "required": [
+        "symbolName"
+      ]
+    }
+  },
+  {
+    "name": "get_di_registrations",
+    "description": "Dependency-injection registrations (Microsoft.Extensions.DependencyInjection, Prism, Autofac): service, implementation, lifetime, file and line, flagging duplicates and captive dependencies (singleton taking a scoped service). Static: assembly scanning, reflection, and extension-method indirection are missed; a Note lists unmapped containers, so Count 0 with a Note does not mean no DI.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "Path substring filter",
+          "type": "string"
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 500
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "format": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_diagnostics",
+    "description": "Compiler errors and warnings for a file, project, or the solution, errors first, with per-severity totals. NuGet analyzers are not run.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "description": "file, project, or solution",
+          "type": "string",
+          "default": "solution"
+        },
+        "path": {
+          "description": "File or project; required unless scope is solution",
+          "type": "string"
+        },
+        "severityFilter": {
+          "description": "error, warning, or all",
+          "type": "string",
+          "default": "all"
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 100
+        },
+        "offset": {
+          "type": "integer"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_endpoint_map",
+    "description": "ASP.NET Core endpoints: Minimal API Map calls (MapGroup prefixes composed) and controller actions, with HTTP method, route, file, and auth (authorized, anonymous, or unmarked). Static analysis: only literal routes resolve; others show ?.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "Path substring filter",
+          "type": "string"
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 500
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "format": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_file_outline",
+    "description": "Skeleton of one file: namespace, types, and member signatures with line numbers, no bodies. Use before reading a file to pick the lines worth reading.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "filePath": {
+          "description": "Path suffix, e.g. Services/OrderService.cs",
+          "type": "string"
+        },
+        "maxResults": {
+          "description": "Max members",
+          "type": "integer",
+          "default": 200
+        }
+      },
+      "required": [
+        "filePath"
+      ]
+    }
+  },
+  {
+    "name": "get_nuget_packages",
+    "description": "NuGet PackageReference inventory per project: id, version (central package management aware), and target framework. Reads disk only; no latest-version lookup.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "projectFilter": {
+          "type": "string"
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 100
+        }
+      }
+    }
+  },
+  {
+    "name": "get_project_graph",
+    "description": "Project dependency graph: per csproj its path, target frameworks, and direct project references. On large solutions prefer summary=true (counts, frameworks, layers, most-referenced projects) or a project filter over raising maxResults.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "description": "Name or path substring; matches also list ReferencedBy",
+          "type": "string"
+        },
+        "summary": {
+          "description": "Return the solution shape instead of the list",
+          "type": "boolean",
+          "default": false
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 500
+        },
+        "offset": {
+          "type": "integer"
+        },
+        "format": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "get_public_api",
+    "description": "Public members of a type (method, property, and event signatures) without reading the file.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "typeName": {
+          "description": "Type name or SymbolId",
+          "type": "string"
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 50
+        },
+        "offset": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "typeName"
+      ]
+    }
+  },
+  {
+    "name": "get_symbol_at",
+    "description": "What the identifier at a file line binds to: kind, signature, containing type, definition location, SymbolId, and for locals and expressions the declared and inferred type with nullability.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "file": {
+          "description": "Path suffix",
+          "type": "string"
+        },
+        "line": {
+          "description": "1-based line",
+          "type": "integer"
+        },
+        "text": {
+          "description": "Identifier on that line (preferred over column)",
+          "type": "string"
+        },
+        "column": {
+          "description": "1-based; used when text is absent",
+          "type": "integer"
+        },
+        "occurrence": {
+          "description": "Which occurrence of text on the line, 1-based",
+          "type": "integer",
+          "default": 1
+        }
+      },
+      "required": [
+        "file",
+        "line"
+      ]
+    }
+  },
+  {
+    "name": "get_symbol_detail",
+    "description": "Signature, parameters, return type, modifiers, and XML docs of one symbol, without its body.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "symbolName": {
+          "description": "Symbol name or SymbolId",
+          "type": "string"
+        },
+        "containingType": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "symbolName"
+      ]
+    }
+  },
+  {
+    "name": "get_symbol_source",
+    "description": "Exact source of one symbol without reading the file: a member in full with docs and attributes; a type as a signatures-only skeleton unless includeBodies. Capped by maxChars.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "symbolName": {
+          "description": "Name, Type.Member, or SymbolId",
+          "type": "string"
+        },
+        "containingType": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "includeBodies": {
+          "description": "Types only: include member bodies",
+          "type": "boolean",
+          "default": false
+        },
+        "maxChars": {
+          "description": "200-20000",
+          "type": "integer",
+          "default": 8000
+        }
+      },
+      "required": [
+        "symbolName"
+      ]
+    }
+  },
+  {
+    "name": "get_test_coverage_map",
+    "description": "Which production types have a test class named after them (OrderServiceTests for OrderService). Structural, not runtime coverage. When applicable=false (integration or feature-style suites) the percentage is meaningless: do not report it as coverage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "projectFilter": {
+          "description": "Production project name",
+          "type": "string"
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 50
+        }
+      }
+    }
+  },
+  {
+    "name": "get_token_savings",
+    "description": "Tokens this server saved in this repository versus reading the source files, with a per-tool leaderboard. Requires CWM_ROSLYN_TELEMETRY=on; data stays local.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "maxResults": {
+          "description": "Leaderboard size",
+          "type": "integer",
+          "default": 25
+        }
+      }
+    }
+  },
+  {
+    "name": "get_type_hierarchy",
+    "description": "Inheritance of a type: base chain, interfaces, and derived types (for an interface, derived interfaces and implementers).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "typeName": {
+          "description": "Type name or SymbolId",
+          "type": "string"
+        },
+        "maxResults": {
+          "description": "Max derived types",
+          "type": "integer",
+          "default": 500
+        },
+        "offset": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "typeName"
+      ]
+    }
+  },
+  {
+    "name": "get_workspace_status",
+    "description": "What is loaded and how healthy: solutions, project and document counts, warm-up progress, reload state, and projects that loaded incompletely. Healthy=false means other tools may miss results. Call when a result looks suspiciously empty. Works while loading.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "maxResults": {
+          "description": "Cap per list",
+          "type": "integer",
+          "default": 50
+        }
+      }
+    }
+  },
+  {
+    "name": "preview_rename",
+    "description": "Preview a semantic rename without applying it (writes nothing): every changed line with old and new text, including implementations, overrides, and call sites, plus compiler conflicts the rename would cause. Apply the edits yourself.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "symbolName": {
+          "description": "Symbol name or SymbolId",
+          "type": "string"
+        },
+        "newName": {
+          "description": "Valid C# identifier (@ prefix allowed)",
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "type": "integer"
+        },
+        "renameOverloads": {
+          "type": "boolean",
+          "default": false
+        },
+        "renameInStrings": {
+          "type": "boolean",
+          "default": false
+        },
+        "renameInComments": {
+          "type": "boolean",
+          "default": false
+        },
+        "maxResults": {
+          "description": "Max changed lines",
+          "type": "integer",
+          "default": 100
+        },
+        "offset": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "symbolName",
+        "newName"
+      ]
+    }
+  },
+  {
+    "name": "resolve_stack_trace",
+    "description": "Map a .NET stack trace to source files and lines, undoing async, lambda, and local-function name rewrites. InSolution marks your frames; FirstSolutionFrame is where to start. Paste the trace verbatim.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "stackTrace": {
+          "description": "Raw trace, exception header included",
+          "type": "string"
+        },
+        "solutionOnly": {
+          "description": "Drop framework frames",
+          "type": "boolean",
+          "default": false
+        },
+        "maxResults": {
+          "type": "integer",
+          "default": 50
+        }
+      },
+      "required": [
+        "stackTrace"
+      ]
+    }
+  }
+]

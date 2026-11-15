@@ -10,11 +10,12 @@ namespace CWM.RoslynNavigator.Tools;
 [McpServerToolType]
 public static class FindImplementationsTool
 {
-    [McpServerTool(Name = "find_implementations"), Description("Find all types that implement an interface or derive from a base class. Each result carries IsGenerated so generated implementations can be skipped.")]
+    [McpServerTool(Name = "find_implementations"), Description("Types that implement an interface or derive from a base class. For base types and interfaces too, use get_type_hierarchy.")]
     public static async Task<string> ExecuteAsync(
         WorkspaceManager workspace,
-        [Description("The interface or base class name to find implementations for")] string interfaceName,
-        [Description("Maximum results to return. TotalFound in the response reports the full count; re-query with a higher value if it exceeds Count.")] int maxResults = 50,
+        [Description("Interface or base class name, or SymbolId")] string interfaceName,
+        int maxResults = 200,
+        int? offset = null,
         CancellationToken ct = default)
     {
         var notReady = await workspace.EnsureReadyOrStatusAsync(ct);
@@ -30,13 +31,16 @@ public static class FindImplementationsTool
         var symbol = resolved.Symbol;
 
         if (symbol is not INamedTypeSymbol typeSymbol)
-            return JsonSerializer.Serialize(new ErrorResponse(
+            return ToolJson.Serialize(new ErrorResponse(
                 ErrorCodes.WrongSymbolKind,
                 $"'{interfaceName}' resolved to a {SymbolResolver.GetKindString(symbol)}, not an interface or class."));
 
-        var implementations = typeSymbol.TypeKind == TypeKind.Interface
-            ? await SymbolFinder.FindImplementationsAsync(typeSymbol, solution, cancellationToken: ct)
-            : await SymbolFinder.FindDerivedClassesAsync(typeSymbol, solution, cancellationToken: ct);
+        // From every target-framework flavor of the type: a consumer of another flavor
+        // implements a different symbol (see SymbolFlavors).
+        var implementations = await SymbolFlavors.SearchAllAsync(typeSymbol, solution, async flavor =>
+            typeSymbol.TypeKind == TypeKind.Interface
+                ? await SymbolFinder.FindImplementationsAsync(flavor, solution, cancellationToken: ct)
+                : await SymbolFinder.FindDerivedClassesAsync(flavor, solution, cancellationToken: ct), ct);
 
         var generated = new GeneratedCodeIndex(workspace);
         var all = new List<ImplementationInfo>();
@@ -54,10 +58,12 @@ public static class FindImplementationsTool
             }
         }
 
-        return Serialize(Paging.Apply(all, maxResults));
+        // A multi-targeted project can declare each implementation once per target framework.
+        return Serialize(Paging.Apply(
+            all.OrderBy(i => i.File, StringComparer.Ordinal).ThenBy(i => i.Line), maxResults, i => (i.Type, i.File, i.Line), offset ?? 0));
     }
 
     private static string Serialize(Paging.Page<ImplementationInfo> page) =>
-        JsonSerializer.Serialize(new ImplementationsResult(
-            page.Items, page.Count, page.TotalFound, page.Truncated, page.Limit));
+        Paging.Fit(page, p => ToolJson.Serialize(new ImplementationsResult(
+            p.Items, p.Count, p.TotalFound, p.Truncated, p.Limit, p.Offset, p.NextOffset)));
 }

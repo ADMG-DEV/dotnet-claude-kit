@@ -1,8 +1,10 @@
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Text.Json;
 using CWM.RoslynNavigator.Analyzers;
 using CWM.RoslynNavigator.Responses;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.FindSymbols;
 using ModelContextProtocol.Server;
 
@@ -62,26 +64,44 @@ public static class FindDeadCodeTool
         "Module", "Installer", "Registrar", "Factory", "Converter"
     ];
 
-    [McpServerTool(Name = "find_dead_code"), Description("Find unused types, methods, and properties across the solution. Identifies symbols with zero references that are not public API entry points, interface implementations, or overrides. Symbols discovered by convention (EF entity configurations, hosted services, migrations, extension-method hosts) are filtered out because a reference search cannot see assembly scanning or DI registration; the count removed is reported as conventionFiltered. Findings are graded: 'low' when the name appears in a string literal (likely reflection-bound), 'medium' when it matches a convention suffix, 'high' otherwise — delete only high-confidence hits without checking. AssemblyScanningDetected reports whether the solution registers types by scanning at all, which softens every result. Uses a fast identifier-match pre-filter: symbols whose exact name appears as an identifier token in another file are assumed referenced without a full reference search, so occasional false negatives are possible for heavily-reused names.")]
+    [McpServerTool(Name = "find_dead_code"), Description("Unused types, methods, and properties, skipping public entry points, interface implementations, overrides, and convention-discovered types (EF configurations, hosted services, migrations). Confidence high is safe to delete; medium matches a convention suffix; low appears in a string (likely reflection). AssemblyScanningDetected weakens all results.")]
     public static async Task<string> ExecuteAsync(
         WorkspaceManager workspace,
-        [Description("Scope: 'file', 'project', or 'solution'")] string scope = "solution",
-        [Description("Optional: file path or project name depending on scope")] string? path = null,
-        [Description("Kind filter: 'type', 'method', 'property', or 'all'")] string kind = "all",
-        [Description("Maximum results to return")] int maxResults = 50,
+        [Description("file, project, or solution")] string scope = "solution",
+        [Description("File path or project name for that scope")] string? path = null,
+        [Description("type, method, property, or all")] string kind = "all",
+        int maxResults = 50,
+        int? offset = null,
         CancellationToken ct = default)
     {
         var notReady = await workspace.EnsureReadyOrStatusAsync(ct);
         if (notReady is not null) return notReady;
 
+        var invalid = ArgumentChecks.Choice("scope", scope, "file", "project", "solution")
+            ?? ArgumentChecks.Choice("kind", kind, "type", "method", "property", "all");
+        if (invalid is not null) return invalid;
+        scope = scope.ToLowerInvariant();
+
         var solution = workspace.GetSolution();
         if (solution is null)
-            return JsonSerializer.Serialize(new DeadCodeResult([], 0, 0, false, Math.Max(1, maxResults)));
+            return ToolJson.Serialize(new DeadCodeResult([], 0, 0, false, Math.Max(1, maxResults)));
 
-        var candidates = new List<(ISymbol Symbol, string File, int Line)>();
-        var conventionFiltered = 0;
+        if (scope == "project" && ArgumentChecks.UnknownProject(solution, path) is { } unknownProject)
+            return unknownProject;
+
+        if (scope == "file" && path is not null
+            && !solution.Projects.SelectMany(p => p.Documents)
+                .Any(d => SourcePaths.ContainsPath(d.FilePath, path)))
+            return ArgumentChecks.FileFilterMatchesNothing(path);
 
         var projects = GetProjectsForScope(solution, scope, path);
+
+        // Which trees to scan, in project order. A multi-targeted project compiles each file
+        // once per framework. A file without preprocessor directives declares the same
+        // symbols in every flavor, so it is scanned once; a file with #if is scanned in every
+        // flavor, since each can declare different ones.
+        var plan = new List<(Compilation Compilation, SyntaxTree Tree, SyntaxNode Root)>();
+        var scannedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var project in projects)
         {
@@ -90,7 +110,7 @@ public static class FindDeadCodeTool
             var compilation = await workspace.GetCompilationAsync(project.Id, ct);
             if (compilation is null) continue;
 
-            var isTestProject = SourceClassifier.IsTestProject(project, compilation);
+            var isTestProject = SourceClassifier.IsTestProject(project);
 
             var trees = scope == "file" && path is not null
                 ? compilation.SyntaxTrees.Where(t => SourcePaths.ContainsPath(t.FilePath, path))
@@ -98,49 +118,76 @@ public static class FindDeadCodeTool
 
             foreach (var tree in trees)
             {
-                ct.ThrowIfCancellationRequested();
-
                 // Generated and migration source is authored by tooling — "unused" is meaningless.
                 var sourceKind = SourceClassifier.Classify(
                     tree, workspace.ToRelativePath(tree.FilePath ?? ""), isTestProject, ct);
                 if (sourceKind is SourceKind.Generated or SourceKind.Migration)
                     continue;
 
-                var semanticModel = compilation.GetSemanticModel(tree);
                 var root = await tree.GetRootAsync(ct);
+                if (tree.FilePath is { Length: > 0 } treePath && !scannedPaths.Add(treePath) && !root.ContainsDirectives)
+                    continue;
 
-                foreach (var node in root.DescendantNodes())
-                {
-                    var symbol = semanticModel.GetDeclaredSymbol(node, ct);
-                    if (symbol is null) continue;
-
-                    if (!MatchesKindFilter(symbol, kind)) continue;
-                    if (ShouldSkip(symbol)) continue;
-
-                    if (IsConventionDiscovered(symbol))
-                    {
-                        conventionFiltered++;
-                        continue;
-                    }
-
-                    var location = SymbolResolver.GetLocation(symbol);
-                    if (location.HasValue)
-                        candidates.Add((symbol, location.Value.File, location.Value.Line));
-                }
+                plan.Add((compilation, tree, root));
             }
         }
+
+        // Declared symbols are bound per tree in parallel and merged in plan order, so the
+        // candidate list matches a sequential scan.
+        var interfaceImplementations = new ConcurrentDictionary<INamedTypeSymbol, HashSet<ISymbol>>(SymbolEqualityComparer.Default);
+        var scans = new (List<(ISymbol Symbol, string File, int Line)> Candidates, int ConventionFiltered)[plan.Count];
+
+        Parallel.For(0, plan.Count, new ParallelOptions { CancellationToken = ct }, i =>
+        {
+            var (compilation, tree, root) = plan[i];
+            var semanticModel = compilation.GetSemanticModel(tree);
+            var found = new List<(ISymbol Symbol, string File, int Line)>();
+            var filtered = 0;
+
+            foreach (var node in DeclarationNodes.Members(root))
+            {
+                var symbol = semanticModel.GetDeclaredSymbol(node, ct);
+                if (symbol is null) continue;
+
+                if (!MatchesKindFilter(symbol, kind)) continue;
+                if (ShouldSkip(symbol, interfaceImplementations)) continue;
+
+                if (IsConventionDiscovered(symbol))
+                {
+                    filtered++;
+                    continue;
+                }
+
+                var location = SymbolResolver.GetLocation(symbol);
+                if (location.HasValue)
+                    found.Add((symbol, location.Value.File, location.Value.Line));
+            }
+
+            scans[i] = (found, filtered);
+        });
+
+        var candidates = scans.SelectMany(s => s.Candidates).ToList();
+        var conventionFiltered = scans.Sum(s => s.ConventionFiltered);
 
         // Deduplicate by display string
         var unique = candidates
             .DistinctBy(c => c.Symbol.ToDisplayString())
             .ToList();
 
-        // Pre-collect all source texts for fast name-based pre-filter, and index the two
-        // reflection paths a reference search is blind to. Both walks cover the whole
-        // solution, not just the requested scope: a type scoped out of the scan can still
-        // be the thing that names this one.
-        var sourceTexts = new Dictionary<SyntaxTree, string>();
-        var reflection = new ReflectionIndex();
+        // Index, in one pass per file, where each candidate name appears for the fast
+        // name-based pre-filter, and the two reflection paths a reference search is blind to.
+        // Both walks cover the whole solution, not just the requested scope: a type scoped
+        // out of the scan can still be the thing that names this one.
+        // Text is identical in every target-framework flavor of a file, so each path is
+        // indexed once and stands for all its flavors in the "appears in another file" test —
+        // indexing every flavor made a name look as if it appeared in a second file, which
+        // hid every candidate in a multi-targeted project. String literals can sit in a
+        // region one flavor compiles out, so files with #if feed every flavor to the
+        // reflection index.
+        var occurrences = new NameOccurrenceIndex(unique.Select(c => c.Symbol.Name));
+        var indexedByPath = new Dictionary<string, SyntaxTree>(StringComparer.OrdinalIgnoreCase);
+        var indexedTrees = new HashSet<SyntaxTree>();
+        var toIndex = new List<(SyntaxTree Tree, SyntaxNode Root, bool Names)>();
 
         foreach (var proj in solution.Projects)
         {
@@ -149,58 +196,199 @@ public static class FindDeadCodeTool
 
             foreach (var tree in comp.SyntaxTrees)
             {
-                if (!sourceTexts.TryAdd(tree, (await tree.GetTextAsync(ct)).ToString()))
+                if (!indexedTrees.Add(tree))
                     continue;
 
-                reflection.Add(await tree.GetRootAsync(ct), ct);
+                ct.ThrowIfCancellationRequested();
+                var root = await tree.GetRootAsync(ct);
+                var firstFlavor = tree.FilePath is not { Length: > 0 } filePath || indexedByPath.TryAdd(filePath, tree);
+
+                if (firstFlavor || root.ContainsDirectives)
+                    toIndex.Add((tree, root, firstFlavor));
             }
         }
 
-        // Check references for each candidate
+        // Both indexes are built per tree in parallel and recorded afterwards.
+        var names = new (List<string>? Names, Microsoft.CodeAnalysis.Text.SourceText? Text)[toIndex.Count];
+        var reflection = new ReflectionIndex();
+        var reflectionGate = new Lock();
+
+        Parallel.For(
+            0,
+            toIndex.Count,
+            new ParallelOptions { CancellationToken = ct },
+            () => new ReflectionIndex(),
+            (i, _, partial) =>
+            {
+                var (tree, root, indexNames) = toIndex[i];
+                if (indexNames)
+                {
+                    var text = tree.GetText(ct);
+                    names[i] = (occurrences.Find(text), text);
+                }
+
+                partial.Add(root, ct);
+                return partial;
+            },
+            partial =>
+            {
+                lock (reflectionGate)
+                    reflection.Merge(partial);
+            });
+
+        for (var i = 0; i < toIndex.Count; i++)
+        {
+            if (names[i] is { Names: { } found, Text: { } text })
+                occurrences.Record(toIndex[i].Tree, found, text);
+        }
+        // Fast pre-filter: if the symbol name appears as a whole identifier in another file,
+        // it is likely referenced. Whole-token matching (not substring) so that e.g.
+        // "OrderService" in another file does not mask a dead "Order" type.
+        var survivors = new List<(ISymbol Symbol, string File, int Line)>();
+        foreach (var candidate in unique)
+        {
+            var declaringTree = candidate.Symbol.DeclaringSyntaxReferences.FirstOrDefault()?.SyntaxTree;
+            if (declaringTree?.FilePath is { Length: > 0 } declaringPath && indexedByPath.TryGetValue(declaringPath, out var indexed))
+                declaringTree = indexed;
+            if (!occurrences.AppearsOutside(candidate.Symbol.Name, declaringTree))
+                survivors.Add(candidate);
+        }
+
+        // A survivor's name appears in no other file, so a reference to it can only sit in the
+        // file declaring it: bind that file's matching names once, for all its survivors,
+        // instead of a solution-wide reference search per survivor — whose cost grew with the
+        // solution while the survivors did too, which made this tool quadratic. Members the
+        // compiler binds without naming them (foreach → GetEnumerator, operators, query
+        // syntax, ...) can be used from a file that never names them, so they keep the
+        // solution-wide search.
+        var referenced = await FindReferencedInDeclaringFilesAsync(
+            solution, survivors.Where(s => !BindsImplicitly(s.Symbol)).Select(s => s.Symbol).ToList(), ct);
+
         var deadCode = new List<DeadCodeInfo>();
         var totalFound = 0;
+        var start = Math.Max(0, offset ?? 0);
+        var limit = Math.Max(1, maxResults);
 
-        foreach (var (symbol, symbolFile, symbolLine) in unique)
+        foreach (var (symbol, symbolFile, symbolLine) in survivors)
         {
             ct.ThrowIfCancellationRequested();
 
-            // Fast pre-filter: if the symbol name appears as a whole identifier in another
-            // file, it is likely referenced. Whole-token matching (not substring) so that
-            // e.g. "OrderService" in another file does not mask a dead "Order" type.
-            var declaringTree = symbol.DeclaringSyntaxReferences.FirstOrDefault()?.SyntaxTree;
-            var likelyReferenced = sourceTexts.Any(kvp =>
-                kvp.Key != declaringTree &&
-                ContainsIdentifier(kvp.Value, symbol.Name));
+            var isReferenced = BindsImplicitly(symbol)
+                ? (await SymbolFinder.FindReferencesAsync(symbol, solution, ct)).Any(r => r.Locations.Any())
+                : referenced.Contains(symbol);
+            if (isReferenced) continue;
 
-            if (likelyReferenced) continue;
-
-            // Expensive but necessary for remaining candidates
-            var references = await SymbolFinder.FindReferencesAsync(symbol, solution, ct);
-            var refCount = references.Sum(r => r.Locations.Count());
-
-            if (refCount == 0)
+            totalFound++;
+            if (totalFound > start && deadCode.Count < limit)
             {
-                totalFound++;
-                if (deadCode.Count < maxResults)
-                {
-                    var (confidence, note) = Grade(symbol, reflection);
+                var (confidence, note) = Grade(symbol, reflection);
 
-                    deadCode.Add(new DeadCodeInfo(
-                        Name: symbol.Name,
-                        Kind: SymbolResolver.GetKindString(symbol),
-                        File: workspace.ToRelativePath(symbolFile),
-                        Line: symbolLine,
-                        ContainingType: symbol.ContainingType?.Name,
-                        Confidence: confidence,
-                        Note: note));
-                }
+                deadCode.Add(new DeadCodeInfo(
+                    Name: symbol.Name,
+                    Kind: SymbolResolver.GetKindString(symbol),
+                    File: workspace.ToRelativePath(symbolFile),
+                    Line: symbolLine,
+                    ContainingType: symbol.ContainingType?.Name,
+                    Confidence: confidence,
+                    Note: note));
             }
         }
 
-        return JsonSerializer.Serialize(new DeadCodeResult(
-            deadCode, deadCode.Count, totalFound,
-            totalFound > deadCode.Count, Math.Max(1, maxResults), conventionFiltered,
-            reflection.AssemblyScanningDetected));
+        var end = Math.Min(start, totalFound) + deadCode.Count;
+        var page = new Paging.Page<DeadCodeInfo>(
+            deadCode, deadCode.Count, totalFound, end < totalFound, limit, Math.Min(start, totalFound), end < totalFound ? end : null);
+
+        return Paging.Fit(page, p => ToolJson.Serialize(new DeadCodeResult(
+            p.Items, p.Count, p.TotalFound, p.Truncated, p.Limit, conventionFiltered,
+            reflection.AssemblyScanningDetected, p.Offset, p.NextOffset)));
+    }
+
+    /// <summary>
+    /// Member names the compiler binds by pattern rather than by an identifier at the use site:
+    /// foreach, await, using, deconstruction, collection initializers, query expressions,
+    /// interpolated string handlers, index/range patterns, collection builders.
+    /// </summary>
+    private static readonly HashSet<string> PatternBoundNames = new(StringComparer.Ordinal)
+    {
+        "GetEnumerator", "GetAsyncEnumerator", "MoveNext", "MoveNextAsync", "Current",
+        "Dispose", "DisposeAsync", "Deconstruct", "GetAwaiter", "GetResult", "IsCompleted",
+        "OnCompleted", "UnsafeOnCompleted", "Add", "GetPinnableReference", "Slice", "Length",
+        "Count", "Item", "Select", "Where", "SelectMany", "Join", "GroupJoin", "OrderBy",
+        "OrderByDescending", "ThenBy", "ThenByDescending", "GroupBy", "Cast",
+        "AppendLiteral", "AppendFormatted", "Create",
+    };
+
+    private static bool BindsImplicitly(ISymbol symbol) => symbol switch
+    {
+        IMethodSymbol { MethodKind: MethodKind.UserDefinedOperator or MethodKind.Conversion or MethodKind.Destructor } => true,
+        IPropertySymbol { IsIndexer: true } => true,
+        _ => PatternBoundNames.Contains(symbol.Name),
+    };
+
+    /// <summary>
+    /// The candidates referenced from the file declaring them, in any target-framework flavor
+    /// of it. The file's text is searched for each candidate's name as a whole identifier;
+    /// each hit that is a name node (doc-comment crefs included; a declaration's own
+    /// identifier is not one) is bound, and its symbol — or, when binding failed, its
+    /// candidate symbols, which a reference search also counts — is matched to the candidate
+    /// by declaration. Files are processed in parallel.
+    /// </summary>
+    private static async Task<HashSet<ISymbol>> FindReferencedInDeclaringFilesAsync(
+        Solution solution, IReadOnlyList<ISymbol> candidates, CancellationToken ct)
+    {
+        var byFile = candidates
+            .GroupBy(c => c.DeclaringSyntaxReferences.FirstOrDefault()?.SyntaxTree.FilePath ?? "", StringComparer.OrdinalIgnoreCase)
+            .Where(g => g.Key.Length > 0)
+            .ToList();
+
+        var found = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+        var gate = new Lock();
+
+        await Parallel.ForEachAsync(byFile, new ParallelOptions { CancellationToken = ct }, async (file, token) =>
+        {
+            var byName = file.GroupBy(c => c.Name, StringComparer.Ordinal).ToDictionary(g => g.Key, g => g.ToList(), StringComparer.Ordinal);
+            var documents = solution.GetDocumentIdsWithFilePath(file.Key)
+                .Select(solution.GetDocument)
+                .OfType<Document>()
+                .ToList();
+            if (documents.Count == 0) return;
+
+            // Text is the same in every flavor; find where the names are spelled first, so only
+            // those positions are bound rather than every name node in the file.
+            var text = (await documents[0].GetTextAsync(token)).ToString();
+            var positions = byName.Keys
+                .SelectMany(name => NameOccurrenceIndex.IdentifierPositions(text, name).Select(position => (Position: position, Name: name)))
+                .ToList();
+            if (positions.Count == 0) return;
+
+            var hits = new List<ISymbol>();
+            foreach (var document in documents)
+            {
+                if (await document.GetSyntaxRootAsync(token) is not { } root) continue;
+
+                SemanticModel? model = null;
+                foreach (var (position, name) in positions)
+                {
+                    // A declaration's own identifier is not a name node, so it never counts.
+                    var tokenAt = root.FindToken(position, findInsideTrivia: true);
+                    if (tokenAt.Parent is not SimpleNameSyntax simpleName || simpleName.Identifier != tokenAt) continue;
+
+                    model ??= await document.GetSemanticModelAsync(token);
+                    if (model is null) break;
+
+                    var info = model.GetSymbolInfo(simpleName, token);
+                    foreach (var bound in info.Symbol is { } single ? [single] : info.CandidateSymbols)
+                    {
+                        var target = (bound as IMethodSymbol)?.ReducedFrom ?? bound;
+                        hits.AddRange(byName[name].Where(c => CallerDispatch.IsSameDeclaration(target.OriginalDefinition, c)));
+                    }
+                }
+            }
+
+            lock (gate)
+                found.UnionWith(hits);
+        });
+        return found;
     }
 
     /// <summary>
@@ -270,30 +458,6 @@ public static class FindDeadCodeTool
         return null;
     }
 
-    /// <summary>
-    /// Checks whether <paramref name="name"/> occurs in <paramref name="text"/> as a whole
-    /// identifier token (not as a substring of a longer identifier).
-    /// </summary>
-    private static bool ContainsIdentifier(string text, string name)
-    {
-        var index = 0;
-        while ((index = text.IndexOf(name, index, StringComparison.Ordinal)) >= 0)
-        {
-            var before = index == 0 ? '\0' : text[index - 1];
-            var afterIndex = index + name.Length;
-            var after = afterIndex >= text.Length ? '\0' : text[afterIndex];
-
-            if (!IsIdentifierChar(before) && !IsIdentifierChar(after))
-                return true;
-
-            index += 1;
-        }
-
-        return false;
-    }
-
-    private static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c == '_';
-
     private static bool MatchesKindFilter(ISymbol symbol, string kind) => kind.ToLowerInvariant() switch
     {
         "type" or "class" => symbol is INamedTypeSymbol,
@@ -303,8 +467,16 @@ public static class FindDeadCodeTool
         _ => symbol is INamedTypeSymbol or IMethodSymbol or IPropertySymbol
     };
 
-    private static bool ShouldSkip(ISymbol symbol)
+    private static bool ShouldSkip(
+        ISymbol symbol,
+        ConcurrentDictionary<INamedTypeSymbol, HashSet<ISymbol>> interfaceImplementations)
     {
+        // Skip non-private members that could be used externally — only internal/private
+        // dead code is flagged. Checked first because it is the cheapest test and rejects
+        // most symbols.
+        if (symbol.DeclaredAccessibility == Accessibility.Public)
+            return true;
+
         // Skip constructors
         if (symbol is IMethodSymbol { MethodKind: MethodKind.Constructor or MethodKind.StaticConstructor })
             return true;
@@ -314,18 +486,9 @@ public static class FindDeadCodeTool
             return true;
 
         // Skip interface implementations
-        if (symbol.ContainingType is not null)
-        {
-            foreach (var iface in symbol.ContainingType.AllInterfaces)
-            {
-                foreach (var member in iface.GetMembers())
-                {
-                    var impl = symbol.ContainingType.FindImplementationForInterfaceMember(member);
-                    if (SymbolEqualityComparer.Default.Equals(impl, symbol))
-                        return true;
-                }
-            }
-        }
+        if (symbol.ContainingType is { } containingType
+            && InterfaceImplementations(containingType, interfaceImplementations).Contains(symbol))
+            return true;
 
         // Skip overrides
         if (symbol is IMethodSymbol { IsOverride: true })
@@ -355,12 +518,34 @@ public static class FindDeadCodeTool
                 return true;
         }
 
-        // Skip non-private members that could be used externally
-        // Only flag internal/private dead code
-        if (symbol.DeclaredAccessibility == Accessibility.Public)
-            return true;
-
         return false;
+    }
+
+    /// <summary>
+    /// Every member of <paramref name="type"/> that implements an interface member, computed
+    /// once per type rather than once per member — the per-member scan was quadratic in the
+    /// size of the type's interface surface.
+    /// </summary>
+    private static HashSet<ISymbol> InterfaceImplementations(
+        INamedTypeSymbol type,
+        ConcurrentDictionary<INamedTypeSymbol, HashSet<ISymbol>> cache)
+    {
+        if (cache.TryGetValue(type, out var cached))
+            return cached;
+
+        var implementations = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+
+        foreach (var iface in type.AllInterfaces)
+        {
+            foreach (var member in iface.GetMembers())
+            {
+                if (type.FindImplementationForInterfaceMember(member) is { } implementation)
+                    implementations.Add(implementation);
+            }
+        }
+
+        cache[type] = implementations;
+        return implementations;
     }
 
     private static IEnumerable<Project> GetProjectsForScope(Solution solution, string scope, string? path) => scope switch

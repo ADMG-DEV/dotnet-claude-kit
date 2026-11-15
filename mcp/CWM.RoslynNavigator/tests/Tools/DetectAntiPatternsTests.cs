@@ -5,7 +5,8 @@ using CWM.RoslynNavigator.Tools;
 
 namespace CWM.RoslynNavigator.Tests.Tools;
 
-public class DetectAntiPatternsTests(TestSolutionFixture fixture) : IClassFixture<TestSolutionFixture>
+[Collection(SampleSolutionCollection.Name)]
+public class DetectAntiPatternsTests(TestSolutionFixture fixture)
 {
     private async Task<AntiPatternsResult> RunAsync(
         string? file = null,
@@ -23,125 +24,125 @@ public class DetectAntiPatternsTests(TestSolutionFixture fixture) : IClassFixtur
     }
 
     [Fact]
-    public async Task DetectsAsyncVoid_AP001()
+    public async Task DetectAntiPatterns_AsyncVoidMethod_ReportsAP001()
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs");
 
-        var violations = result.Violations.Where(v => v.Id == "AP001").ToList();
+        var violations = result.Expand().Where(v => v.Id == "AP001").ToList();
         Assert.Single(violations);
         Assert.Contains("FireAndForget", violations[0].Message);
         Assert.Equal("error", violations[0].Severity);
     }
 
     [Fact]
-    public async Task SkipsEventHandler_AP001()
+    public async Task DetectAntiPatterns_AsyncVoidEventHandler_IsNotReported()
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs");
 
-        var violations = result.Violations.Where(v => v.Id == "AP001").ToList();
-        Assert.DoesNotContain(violations, v => v.Message.Contains("OnButtonClick"));
+        var violations = result.Expand().Where(v => v.Id == "AP001").ToList();
+        Assert.DoesNotContain(violations, v => v.Message!.Contains("OnButtonClick"));
     }
 
     [Fact]
-    public async Task DetectsSyncOverAsync_AP002()
+    public async Task DetectAntiPatterns_SyncOverAsync_ReportsAP002()
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs");
 
-        var violations = result.Violations.Where(v => v.Id == "AP002").ToList();
+        var violations = result.Expand().Where(v => v.Id == "AP002").ToList();
         Assert.True(violations.Count >= 2, $"Expected at least 2 AP002 violations, got {violations.Count}");
         Assert.Equal("error", violations[0].Severity);
     }
 
     [Fact]
-    public async Task DetectsNewHttpClient_AP003()
+    public async Task DetectAntiPatterns_NewHttpClient_ReportsAP003()
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs");
 
-        var violations = result.Violations.Where(v => v.Id == "AP003").ToList();
+        var violations = result.Expand().Where(v => v.Id == "AP003").ToList();
         Assert.Single(violations);
         Assert.Equal("warning", violations[0].Severity);
     }
 
     [Fact]
-    public async Task DetectsDateTimeNow_AP004()
+    public async Task DetectAntiPatterns_DateTimeNow_ReportsAP004()
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs");
 
-        var violations = result.Violations.Where(v => v.Id == "AP004").ToList();
+        var violations = result.Expand().Where(v => v.Id == "AP004").ToList();
         Assert.True(violations.Count >= 2, $"Expected at least 2 AP004 violations, got {violations.Count}");
     }
 
     [Fact]
-    public async Task DetectsBroadCatch_AP005()
+    public async Task DetectAntiPatterns_BroadCatch_ReportsAP005()
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs");
 
-        var violations = result.Violations.Where(v => v.Id == "AP005").ToList();
+        var violations = result.Expand().Where(v => v.Id == "AP005").ToList();
         Assert.Single(violations);
         Assert.Equal("warning", violations[0].Severity);
     }
 
     [Fact]
-    public async Task DetectsLoggingInterpolation_AP006()
+    public async Task DetectAntiPatterns_LoggingInterpolation_ReportsAP006()
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs");
 
-        var violations = result.Violations.Where(v => v.Id == "AP006").ToList();
+        var violations = result.Expand().Where(v => v.Id == "AP006").ToList();
         Assert.True(violations.Count >= 1, $"Expected at least 1 AP006 violation, got {violations.Count}");
     }
 
     [Fact]
-    public async Task DetectsEmptyCatch_AP007()
+    public async Task DetectAntiPatterns_EmptyCatch_ReportsAP007()
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs");
 
-        var violations = result.Violations.Where(v => v.Id == "AP007").ToList();
+        var violations = result.Expand().Where(v => v.Id == "AP007").ToList();
         Assert.Single(violations);
         Assert.Equal("error", violations[0].Severity);
     }
 
     [Fact]
-    public async Task DetectsPragmaWithoutRestore_AP008()
+    public async Task DetectAntiPatterns_PragmaWithoutRestore_ReportsAP008()
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs");
 
-        var violations = result.Violations.Where(v => v.Id == "AP008").ToList();
+        var violations = result.Expand().Where(v => v.Id == "AP008").ToList();
         Assert.Single(violations);
         Assert.Contains("CS0219", violations[0].Snippet);
     }
 
     [Fact]
-    public async Task DetectsMissingCancellationToken_AP009()
+    public async Task DetectAntiPatterns_MissingCancellationToken_ReportsAP009()
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs");
 
-        var violations = result.Violations.Where(v => v.Id == "AP009").ToList();
+        var violations = result.Expand().Where(v => v.Id == "AP009").ToList();
         Assert.Single(violations);
         Assert.Contains("DoWorkAsync", violations[0].Message);
     }
 
     [Fact]
-    public async Task SeverityFilterError_OnlyReturnsErrors()
+    public async Task DetectAntiPatterns_SeverityError_OnlyReturnsErrors()
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs", severity: "error");
 
-        Assert.All(result.Violations, v => Assert.Equal("error", v.Severity));
+        Assert.All(result.Expand(), v => Assert.Equal("error", v.Severity));
         Assert.True(result.Count > 0);
     }
 
     [Fact]
-    public async Task ProjectFilter_LimitsToProject()
+    public async Task DetectAntiPatterns_ProjectFilter_LimitsToProject()
     {
         var result = await RunAsync(projectFilter: "SampleDomain");
 
         // SampleDomain has no intentional anti-patterns
         // Should return 0 or very few violations
-        Assert.All(result.Violations, v =>
+        Assert.All(result.Expand(), v =>
             Assert.DoesNotContain("AntiPatternExamples", v.File));
     }
 
     [Fact]
-    public async Task MaxResults_LimitsOutput()
+    public async Task DetectAntiPatterns_MaxResults_LimitsOutput()
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs", maxResults: 3);
 
@@ -150,11 +151,41 @@ public class DetectAntiPatternsTests(TestSolutionFixture fixture) : IClassFixtur
     }
 
     [Fact]
-    public async Task FileFilter_LimitsToFile()
+    public async Task DetectAntiPatterns_FileFilter_LimitsToFile()
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs");
 
-        Assert.All(result.Violations, v =>
+        Assert.All(result.Expand(), v =>
             Assert.Contains("AntiPatternExamples", v.File));
+    }
+
+    [Fact]
+    public async Task DetectAntiPatterns_RepeatedDetector_StatesRuleOnceAndOmitsMatchingFields()
+    {
+        // Act
+        var result = await RunAsync(file: "AntiPatternExamples.cs");
+
+        // Assert
+        Assert.NotNull(result.Rules);
+        Assert.Equal(result.Violations.Select(v => v.Id).Distinct().Order(), result.Rules.Select(r => r.Id));
+        foreach (var violation in result.Violations)
+        {
+            var rule = result.Rules.Single(r => r.Id == violation.Id);
+            Assert.NotEqual(rule.Message, violation.Message);
+            Assert.NotEqual(rule.Suggestion, violation.Suggestion);
+            Assert.NotEqual("high", violation.Confidence);
+            Assert.NotEqual("production", violation.SourceKind);
+        }
+    }
+
+    [Theory]
+    [InlineData("netstandard2.0", "net8.0")]
+    [InlineData("net8.0", "net10.0")]
+    [InlineData("net48", "netstandard2.1")]
+    [InlineData("net10.0-android", "net10.0")]
+    [InlineData("netcoreapp3.1", "net5.0")]
+    public void FrameworkRank_OlderAndNewer_OrdersNewerHigher(string older, string newer)
+    {
+        Assert.True(DetectAntiPatternsTool.FrameworkRank(older).CompareTo(DetectAntiPatternsTool.FrameworkRank(newer)) < 0);
     }
 }

@@ -10,8 +10,8 @@ namespace CWM.RoslynNavigator.Tests.Tools;
 /// naive detector reports. These tests are the contract that keeps health-check output
 /// trustworthy enough to grade directly.
 /// </summary>
+[Collection(SampleSolutionCollection.Name)]
 public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
-    : IClassFixture<TestSolutionFixture>
 {
     private async Task<AntiPatternsResult> RunAsync(
         string? file = null,
@@ -32,33 +32,33 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     // ---- Source classification -------------------------------------------------------
 
     [Fact]
-    public async Task TestClassifiedFile_ProducesNoProductionFindings()
+    public async Task DetectAntiPatterns_TestClassifiedFile_ProducesNoProductionFindings()
     {
         var result = await RunAsync(file: "CustomerWorkflowTests.cs");
 
-        Assert.Empty(result.Violations);
+        Assert.Empty(result.Expand());
     }
 
     [Fact]
-    public async Task MigrationFolder_ProducesNoProductionFindings()
+    public async Task DetectAntiPatterns_MigrationFile_ProducesNoProductionFindings()
     {
         var result = await RunAsync(file: "20240101000000_InitialCreate.cs");
 
-        Assert.Empty(result.Violations);
+        Assert.Empty(result.Expand());
     }
 
     [Fact]
-    public async Task GeneratedCode_IsNeverReported()
+    public async Task DetectAntiPatterns_ScopeAll_NeverReportsGeneratedCode()
     {
         var result = await RunAsync(scope: "all");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.File.Contains("/obj/", StringComparison.OrdinalIgnoreCase)
             || v.File.EndsWith(".g.cs", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
-    public async Task ScopeAll_SurfacesFindingsThatApplyToTestCode()
+    public async Task DetectAntiPatterns_ScopeAllOnTestFile_SurfacesFindingsThatApplyToTests()
     {
         var production = await RunAsync(file: "CustomerWorkflowTests.cs");
         var all = await RunAsync(file: "CustomerWorkflowTests.cs", scope: "all");
@@ -72,7 +72,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     }
 
     [Fact]
-    public async Task ScopeAll_StillExcludesDetectorsThatAreMeaninglessInTests()
+    public async Task DetectAntiPatterns_ScopeAllOnTestFile_ExcludesDetectorsMeaninglessInTests()
     {
         var all = await RunAsync(file: "CustomerWorkflowTests.cs", scope: "all");
 
@@ -88,7 +88,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.Id == "AP006" && v.Member!.Contains("LogWithWrappedTemplate"));
     }
 
@@ -97,7 +97,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.Id == "AP006" && v.Member!.Contains("LogWithConstPrefix"));
     }
 
@@ -106,7 +106,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.Id == "AP006" && v.Member!.Contains("LogWithConcatenatedValue"));
     }
 
@@ -117,7 +117,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v => v.Id == "AP007");
+        Assert.DoesNotContain(result.Expand(), v => v.Id == "AP007");
     }
 
     [Fact]
@@ -125,7 +125,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        var violation = Assert.Single(result.Violations, v =>
+        var violation = Assert.Single(result.Expand(), v =>
             v.Id == "AP005" && v.Member!.Contains("BoundedResilienceWrapper"));
         Assert.Equal("medium", violation.Confidence);
     }
@@ -135,18 +135,18 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        var violation = Assert.Single(result.Violations, v =>
+        var violation = Assert.Single(result.Expand(), v =>
             v.Id == "AP005" && v.Member!.Contains("FilteredCatch"));
         Assert.Equal("medium", violation.Confidence);
     }
 
     [Fact]
-    public async Task HighConfidenceFilter_ExcludesResilienceWrappers()
+    public async Task DetectAntiPatterns_HighConfidence_ExcludesResilienceWrappers()
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs", confidence: "high");
 
-        Assert.DoesNotContain(result.Violations, v => v.Id == "AP005");
-        Assert.All(result.Violations, v => Assert.Equal("high", v.Confidence));
+        Assert.DoesNotContain(result.Expand(), v => v.Id == "AP005");
+        Assert.All(result.Expand(), v => Assert.Equal("high", v.Confidence));
     }
 
     // ---- AP002: sync over async ------------------------------------------------------
@@ -156,7 +156,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v => v.Id == "AP002");
+        Assert.DoesNotContain(result.Expand(), v => v.Id == "AP002");
     }
 
     // ---- AP010: EF Core tracking -----------------------------------------------------
@@ -166,7 +166,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.Id == "AP010" && (v.Member!.Contains("CountCustomers") || v.Member.Contains("AnyCustomers")));
     }
 
@@ -175,7 +175,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.Id == "AP010" && v.Member!.Contains("ResetTwoFactorAsync"));
     }
 
@@ -184,7 +184,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.Id == "AP010" && v.Member!.Contains("RawSqlScalarQuery"));
     }
 
@@ -193,7 +193,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.Id == "AP010" && v.Member!.Contains("ReadChangeTrackerEntries"));
     }
 
@@ -202,7 +202,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.Id == "AP010" && v.Member!.Contains("RenameCustomerAsync"));
     }
 
@@ -211,7 +211,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.Id == "AP010" && v.Member!.Contains("ArchiveCustomerAsync"));
     }
 
@@ -220,7 +220,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        var violation = Assert.Single(result.Violations, v =>
+        var violation = Assert.Single(result.Expand(), v =>
             v.Id == "AP010" && v.Member!.Contains("ProcessCustomerBatch"));
         Assert.Equal("medium", violation.Confidence);
     }
@@ -230,7 +230,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.Id == "AP007" && v.Member!.Contains("RunUntilStoppedAsync"));
     }
 
@@ -239,7 +239,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs");
 
-        var violation = Assert.Single(result.Violations, v => v.Id == "AP010");
+        var violation = Assert.Single(result.Expand(), v => v.Id == "AP010");
         Assert.Contains("ListCustomersAsync", violation.Member);
         Assert.Equal("high", violation.Confidence);
     }
@@ -251,7 +251,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.Id == "AP009" && v.Member!.Contains("HandleRequestAsync"));
     }
 
@@ -260,7 +260,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.Id == "AP009" && v.Member!.Contains("AuditMiddleware"));
     }
 
@@ -269,7 +269,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.Id == "AP009" && v.Member!.Contains("RunStartupTasksAsync"));
     }
 
@@ -278,7 +278,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs");
 
-        var violation = Assert.Single(result.Violations, v => v.Id == "AP009");
+        var violation = Assert.Single(result.Expand(), v => v.Id == "AP009");
         Assert.Equal("medium", violation.Confidence);
     }
 
@@ -289,18 +289,18 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        var violation = Assert.Single(result.Violations, v => v.Id == "AP003");
+        var violation = Assert.Single(result.Expand(), v => v.Id == "AP003");
         Assert.Equal("medium", violation.Confidence);
     }
 
     // ---- Suppression ---------------------------------------------------------------------
 
     [Fact]
-    public async Task InlineIgnoreMarker_RemovesFindingButCountsIt()
+    public async Task DetectAntiPatterns_InlineIgnoreMarker_RemovesFindingButCountsIt()
     {
         var result = await RunAsync(file: "FalsePositiveExamples.cs");
 
-        Assert.DoesNotContain(result.Violations, v =>
+        Assert.DoesNotContain(result.Expand(), v =>
             v.Id == "AP004" && v.Member!.Contains("PresignedUrlExpiry"));
 
         var ap004 = Assert.Single(result.Summary!.ById, e => e.Id == "AP004");
@@ -311,7 +311,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     // ---- Summary -----------------------------------------------------------------------
 
     [Fact]
-    public async Task Summary_IsCompleteEvenWhenTruncated()
+    public async Task DetectAntiPatterns_Truncated_SummaryStaysComplete()
     {
         var full = await RunAsync();
         var truncated = await RunAsync(maxResults: 1);
@@ -328,7 +328,7 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     }
 
     [Fact]
-    public async Task Summary_CountsGeneratedFilesSeparately()
+    public async Task DetectAntiPatterns_ScopeAll_SummaryCountsGeneratedFilesSeparately()
     {
         var result = await RunAsync(scope: "all");
 
@@ -339,12 +339,12 @@ public class DetectAntiPatternsFalsePositiveTests(TestSolutionFixture fixture)
     }
 
     [Fact]
-    public async Task Violations_CarryEnclosingMember()
+    public async Task DetectAntiPatterns_AnyViolation_CarriesEnclosingMember()
     {
         var result = await RunAsync(file: "AntiPatternExamples.cs");
 
         Assert.All(
-            result.Violations.Where(v => v.Id != "AP008"),
+            result.Expand().Where(v => v.Id != "AP008"),
             v => Assert.False(string.IsNullOrWhiteSpace(v.Member)));
     }
 }

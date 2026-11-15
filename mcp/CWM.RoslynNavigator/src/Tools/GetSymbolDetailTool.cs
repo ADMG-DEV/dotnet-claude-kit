@@ -9,19 +9,17 @@ namespace CWM.RoslynNavigator.Tools;
 [McpServerToolType]
 public static class GetSymbolDetailTool
 {
-    [McpServerTool(Name = "get_symbol_detail"), Description("Get detailed information about a symbol including full signature, parameters, return type, modifiers, and XML documentation. Perfect for understanding APIs without reading the whole file.")]
+    [McpServerTool(Name = "get_symbol_detail"), Description("Signature, parameters, return type, modifiers, and XML docs of one symbol, without its body.")]
     public static async Task<string> ExecuteAsync(
         WorkspaceManager workspace,
-        [Description("Symbol name (type, method, property). Bare, type-qualified ('OrderService.CreateAsync'), or fully qualified.")] string symbolName,
-        [Description("Optional: containing type name for methods/properties")] string? containingType = null,
+        [Description("Symbol name or SymbolId")] string symbolName,
+        string? containingType = null,
         CancellationToken ct = default)
     {
         var notReady = await workspace.EnsureReadyOrStatusAsync(ct);
         if (notReady is not null) return notReady;
 
-        var lookupName = containingType is not null && !symbolName.Contains('.')
-            ? $"{containingType}.{symbolName}"
-            : symbolName;
+        var lookupName = SymbolResolver.Qualify(symbolName, containingType);
 
         var resolved = await SymbolResolver.ResolveOrErrorAsync(workspace, lookupName, ct: ct);
         if (resolved.Failed) return resolved.Error;
@@ -60,7 +58,7 @@ public static class GetSymbolDetailTool
             File: location is { } loc ? workspace.ToRelativePath(loc.File) : "unknown",
             Line: location?.Line ?? 0);
 
-        return JsonSerializer.Serialize(detail);
+        return ToolJson.Serialize(detail);
     }
 
     private static string? ExtractXmlSummary(string? xmlDoc)

@@ -5,7 +5,8 @@ using CWM.RoslynNavigator.Tools;
 
 namespace CWM.RoslynNavigator.Tests.Tools;
 
-public class AnalyzeChangeImpactTests(TestSolutionFixture fixture) : IClassFixture<TestSolutionFixture>
+[Collection(SampleSolutionCollection.Name)]
+public class AnalyzeChangeImpactTests(TestSolutionFixture fixture)
 {
     [Fact]
     public async Task AnalyzeChangeImpact_Interface_CountsImplementationsThatMustChange()
@@ -34,7 +35,7 @@ public class AnalyzeChangeImpactTests(TestSolutionFixture fixture) : IClassFixtu
     }
 
     [Fact]
-    public async Task AnalyzeChangeImpact_ReferenceCountsAgreeAcrossGroupings()
+    public async Task AnalyzeChangeImpact_CrossProjectType_ReferenceCountsAgreeAcrossGroupings()
     {
         var json = await AnalyzeChangeImpactTool.ExecuteAsync(
             fixture.WorkspaceManager, "SampleDomain.Order", maxResults: 500,
@@ -56,6 +57,21 @@ public class AnalyzeChangeImpactTests(TestSolutionFixture fixture) : IClassFixtu
 
         Assert.NotEmpty(shallow.TransitiveCallers);
         Assert.Contains(shallow.TransitiveCallers, c => c.EndsWith("OrderService.GetOrderAsync"));
+    }
+
+    [Fact]
+    public async Task AnalyzeChangeImpact_ConcreteMethod_CountsCallersThroughInterface()
+    {
+        // Nothing calls InMemoryOrderRepository.GetByIdAsync on the concrete type; every
+        // caller goes through IOrderRepository. They are still affected by the change.
+        var result = JsonSerializer.Deserialize<ChangeImpactResult>(
+            await AnalyzeChangeImpactTool.ExecuteAsync(
+                fixture.WorkspaceManager, "InMemoryOrderRepository.GetByIdAsync", depth: 1,
+                ct: TestContext.Current.CancellationToken))!;
+
+        Assert.Contains(result.TransitiveCallers, c => c.EndsWith("OrderService.GetOrderAsync"));
+        Assert.True(result.IndirectCallers > 0);
+        Assert.True(result.IndirectCallers <= result.TransitiveCallerCount);
     }
 
     [Fact]

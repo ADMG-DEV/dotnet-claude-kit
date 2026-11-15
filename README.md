@@ -3,7 +3,7 @@
   <p align="center">
     <strong>Make Claude Code an expert .NET developer.</strong>
     <br />
-    47 skills &bull; 10 specialist agents &bull; 16 slash commands &bull; 10 rules &bull; 5 project templates &bull; 22 MCP tools &bull; automation hooks
+    52 skills &bull; 11 specialist agents &bull; 17 slash commands &bull; 10 rules &bull; 7 project templates &bull; 26 MCP tools &bull; automation hooks
     <br />
     Built for .NET 10 / C# 14. Architecture-aware. Token-efficient.
   </p>
@@ -18,13 +18,13 @@
 <p align="center">
   <a href="https://codewithmukesh.com/blog/dotnet-claude-kit-guide/"><strong>📖 Full Guide</strong></a> &bull;
   <a href="#installation">Installation</a> &bull;
-  <a href="#quick-start">Quick Start</a> &bull;
+  <a href="#per-project-setup">Quick Start</a> &bull;
   <a href="#what-makes-this-10x">10x Features</a> &bull;
-  <a href="#slash-commands-14">Commands</a> &bull;
-  <a href="#knowledge-skills-31">Skills</a> &bull;
-  <a href="#agents-10">Agents</a> &bull;
+  <a href="#slash-commands-17">Commands</a> &bull;
+  <a href="#knowledge-skills-35">Skills</a> &bull;
+  <a href="#agents-11">Agents</a> &bull;
   <a href="#rules-10">Rules</a> &bull;
-  <a href="#templates-5">Templates</a> &bull;
+  <a href="#templates-7">Templates</a> &bull;
   <a href="#roslyn-mcp-server">MCP Server</a> &bull;
   <a href="#contributing">Contributing</a>
 </p>
@@ -47,17 +47,18 @@ Claude Code is powerful, but out of the box it doesn't know **your** .NET conven
 
 ## What This Is
 
-A curated knowledge and action layer that sits between Claude Code and your .NET project. Drop a single `CLAUDE.md` into your repo and Claude instantly knows:
+A curated knowledge and action layer that sits between Claude Code and your .NET project. Install the plugin, run `/dotnet-init` once, and Claude knows:
 
 - Which architecture fits your project (VSA, Clean Architecture, DDD, Modular Monolith)
 - How to write modern C# 14 with primary constructors, collection expressions, and records
 - How to build minimal APIs with `IEndpointGroup` auto-discovery, `TypedResults`, and proper OpenAPI metadata
 - How to use EF Core without repository wrappers, with compiled queries and interceptors
 - How to test with `WebApplicationFactory` + `Testcontainers` instead of in-memory fakes
+- How to build console tools, CLIs (System.CommandLine), and desktop apps (MVVM, Avalonia, WPF), and ship them with Native AOT
 - How to navigate your codebase via Roslyn semantic analysis instead of expensive file reads
 - **How to scaffold complete features, run health checks, review PRs, and enforce conventions**
 
-**No configuration. No setup wizards. Just copy one file and go.**
+**One plugin install, one `/dotnet-init`, and you're set.**
 
 ## What Makes This 10x
 
@@ -65,7 +66,7 @@ An **action layer** on top of the knowledge layer — Claude doesn't just know t
 
 | Capability | What It Does |
 |-----------|-------------|
-| **Surgical Code Analysis** | 22 Roslyn-powered MCP tools with guaranteed bounded responses. `get_symbol_source` reads ONE method body instead of the whole file. `get_file_outline` shows what's in a file before reading it. `resolve_stack_trace` turns an exception into file:line in your own code. `analyze_change_impact` answers "what breaks if I change this?" in one call. Every list-returning tool reports `Truncated` — no tool can blow your context window. |
+| **Surgical Code Analysis** | 26 Roslyn-powered MCP tools with guaranteed bounded responses. `get_symbol_source` reads ONE method body instead of the whole file. `get_file_outline` shows what's in a file before reading it. `resolve_stack_trace` turns an exception into file:line in your own code. `analyze_change_impact` answers "what breaks if I change this?" in one call. Every list-returning tool reports `Truncated` — no tool can blow your context window. In real Claude Code sessions on five open-source solutions, answers came back **32% faster** with **less than half the tool calls**, and were far more accurate (**92 vs 61** out of 100) than with the default Grep + Read ([benchmarks](#benchmarks)). |
 | **Architecture Enforcement** | `/arch-check` verifies the code still matches its declared architecture (VSA, Clean, DDD, Modular Monolith): dependency direction, layer violations, module leaks, cycles — with file:line evidence and fixes. |
 | **Dependency Health** | `/outdated` reports stale packages, CVEs, and commercial-license traps (MediatR 13+, MassTransit 9+, FluentAssertions 8+, AutoMapper 15+) before an innocent update-all changes your legal position. |
 | **Security Mapping** | `get_endpoint_map` inventories every route with its auth posture (`authorized`/`anonymous`/`unmarked`) in one token-cheap call — `/security-scan` starts every auth audit there. |
@@ -97,7 +98,7 @@ An **action layer** on top of the knowledge layer — Claude doesn't just know t
 
 ### Plugin Install (Recommended)
 
-Install as a Claude Code plugin — all 47 skills (including 16 slash-command workflows), 10 agents, hooks, and MCP config activate globally. The 10 rules ship in this repo for you to copy into your project's `.claude/rules/`:
+Install as a Claude Code plugin — all 52 skills (including 17 slash-command workflows), 11 agents, hooks, and MCP config activate globally. The 10 rules ship in this repo for you to copy into your project's `.claude/rules/`:
 
 ```bash
 # In your terminal — install the Roslyn MCP server
@@ -120,6 +121,16 @@ Then inside a Claude Code session:
 claude --plugin-dir /path/to/dotnet-claude-kit
 ```
 
+**Using [APM](https://github.com/microsoft/apm) (Agent Package Manager)?** The repo installs as-is, with skills, agents, hooks, and the MCP server config:
+
+```bash
+apm install codewithmukesh/dotnet-claude-kit --target claude    # or --target copilot
+```
+
+Pin a tag or commit SHA (`codewithmukesh/dotnet-claude-kit#<tag-or-sha>`) to keep installs reproducible. For the Copilot target, APM renames agents to `*.agent.md` itself.
+
+> **Windows: "Failed to finalize marketplace cache" (EPERM)?** That's a Claude Code installer issue ([anthropics/claude-code#12174](https://github.com/anthropics/claude-code/issues/12174)). Close every Claude Code session, delete `%USERPROFILE%\.claude\plugins\marketplaces\*dotnet-claude-kit*`, pause OneDrive sync if `.claude` lives under it, and run the marketplace add again.
+
 ### Per-Project Setup
 
 Navigate to your project directory (existing or empty) and run:
@@ -128,7 +139,9 @@ Navigate to your project directory (existing or empty) and run:
 /dotnet-init
 ```
 
-**Existing project?** It detects your solution, scans .csproj SDKs, reads your tech stack from config, asks architecture questions, and generates a customized `CLAUDE.md`.
+**Existing project?** It detects your solution, scans .csproj SDKs, reads your tech stack from config, asks architecture questions, and generates a customized `CLAUDE.md`. It works for web APIs, console apps and CLI tools, desktop apps (WPF, Avalonia, WinForms, MAUI), and libraries.
+
+**Already have a `CLAUDE.md`?** `/dotnet-init` never overwrites it silently. It asks you to **Merge** (recommended: keeps your own sections and adds or refreshes only the kit's), **Overwrite**, or **Keep**, and backs your original up to `CLAUDE.md.bak` first.
 
 **Greenfield project?** It asks what you're building, scaffolds the full solution structure (`dotnet new sln`, projects, `Directory.Build.props`, `src/` and `tests/` folders), then generates `CLAUDE.md`. Follow up with `/scaffold` to add your first feature.
 
@@ -145,13 +158,15 @@ cp templates/modular-monolith/CLAUDE.md ./CLAUDE.md   # Multi-module system
 cp templates/blazor-app/CLAUDE.md ./CLAUDE.md          # Blazor app
 cp templates/worker-service/CLAUDE.md ./CLAUDE.md      # Background workers
 cp templates/class-library/CLAUDE.md ./CLAUDE.md       # NuGet packages
+cp templates/console-cli/CLAUDE.md ./CLAUDE.md         # Console app / CLI tool
+cp templates/desktop-app/CLAUDE.md ./CLAUDE.md         # Avalonia / WPF / WinForms / MAUI
 ```
 
 Replace `[ProjectName]`, update tech stack, choose your architecture.
 
 </details>
 
-Start Claude Code — 47 skills, 10 agents, and 22 MCP tools activate automatically. Copy the 10 rules into your project's `.claude/rules/` to make them always-loaded.
+Start Claude Code — 52 skills, 11 agents, and 26 MCP tools activate automatically. Copy the 10 rules into your project's `.claude/rules/` to make them always-loaded.
 
 That's it. Claude now writes .NET code the way a senior .NET engineer would.
 
@@ -209,7 +224,7 @@ public static class CreateOrder
     internal sealed class Handler(AppDbContext db, TimeProvider clock)
         : IRequestHandler<Command, Result<Response>>
     {
-        public async Task<Result<Response>> Handle(Command request, CancellationToken ct)
+        public async ValueTask<Result<Response>> Handle(Command request, CancellationToken ct)
         {
             var order = Order.Create(request.CustomerId, request.Items, clock.GetUtcNow());
             db.Orders.Add(order);
@@ -239,7 +254,7 @@ public sealed class OrderEndpoints : IEndpointGroup
 
 ---
 
-## Slash Commands (16)
+## Slash Commands (17)
 
 Shortcut workflows that orchestrate skills and agents. Type the command and Claude handles the rest. These are workflow skills — each lives at `skills/<name>/SKILL.md`, registers its `/name` automatically, and carries its methodology inline (no separate knowledge twin to load).
 
@@ -261,6 +276,7 @@ Shortcut workflows that orchestrate skills and agents. Type the command and Clau
 | `/wrap-up` | Session handoff lifecycle: end-of-session ritual + session-start loading | instinct-system skill |
 | `/outdated` | Dependency health: outdated packages, CVEs, and commercial-license traps | get_nuget_packages MCP tool |
 | `/arch-check` | Architecture conformance: dependency direction, layer violations, module leaks | get_project_graph MCP tool |
+| `/token-report` | Measured token savings, tool leaderboard, and adoption rate | get_token_savings MCP tool + Stats CLI |
 
 Instinct operations (status, export, import) are modes of the [instinct-system](skills/instinct-system/SKILL.md) skill — say "show instincts", "export instincts", or "import instincts".
 
@@ -281,9 +297,9 @@ Project-level conventions that apply to every interaction once loaded. Rules shi
 | [hooks](.claude/rules/hooks.md) | Auto-accept formatting, never skip pre-commit hooks |
 | [packages](.claude/rules/packages.md) | Always use latest stable NuGet versions, never rely on training data versions |
 
-## Knowledge Skills (31)
+## Knowledge Skills (35)
 
-Code-heavy reference files that teach Claude .NET best practices. Each skill is under 400 lines with concrete code examples, anti-patterns (BAD/GOOD comparisons), and decision guides. (The other 16 of the 47 skills are the workflow orchestrators documented under [Slash Commands](#slash-commands-16).)
+Code-heavy reference files that teach Claude .NET best practices. Each skill is under 400 lines with concrete code examples, anti-patterns (BAD/GOOD comparisons), and decision guides. (The other 17 of the 52 skills are the workflow orchestrators documented under [Slash Commands](#slash-commands-17).)
 
 | Category | Skills | What Claude Learns |
 |----------|--------|--------------------|
@@ -295,11 +311,12 @@ Code-heavy reference files that teach Claude .NET best practices. Each skill is 
 | **Observability** | [logging](skills/logging/SKILL.md), [serilog](skills/serilog/SKILL.md), [opentelemetry](skills/opentelemetry/SKILL.md) | Health checks and correlation IDs, Serilog structured logging, OpenTelemetry traces and metrics |
 | **Testing** | [testing](skills/testing/SKILL.md) | xUnit v3, `WebApplicationFactory`, `Testcontainers`, Verify snapshots |
 | **DevOps** | [docker](skills/docker/SKILL.md), [container-publish](skills/container-publish/SKILL.md), [ci-cd](skills/ci-cd/SKILL.md), [aspire](skills/aspire/SKILL.md) | Multi-stage builds, Dockerfile-less SDK publishing, GitHub Actions, .NET Aspire orchestration |
+| **Console & Desktop** | [console-cli](skills/console-cli/SKILL.md), [desktop-mvvm](skills/desktop-mvvm/SKILL.md), [avalonia](skills/avalonia/SKILL.md), [native-aot](skills/native-aot/SKILL.md) | System.CommandLine 2.x, exit codes and stdout/stderr discipline, CommunityToolkit.Mvvm, Avalonia 12 compiled bindings, Native AOT and trimming |
 | **Cross-cutting** | [dependency-injection](skills/dependency-injection/SKILL.md), [configuration](skills/configuration/SKILL.md) | Keyed services, Options pattern, secrets management |
 | **Project Setup** | [project-setup](skills/project-setup/SKILL.md), [convention-learner](skills/convention-learner/SKILL.md) | Solution scaffolding, convention detection and enforcement |
 | **Workflow & Learning** | [workflow-mastery](skills/workflow-mastery/SKILL.md), [instinct-system](skills/instinct-system/SKILL.md) | Parallel worktrees, plan mode strategy, subagent patterns, context discipline; confidence-scored instincts, correction capture, discovery logging |
 
-## Agents (10)
+## Agents (11)
 
 Specialist agents that Claude routes queries to automatically. Each agent loads the right skills, uses MCP tools for context, and knows its boundaries.
 
@@ -315,8 +332,9 @@ Specialist agents that Claude routes queries to automatically. Each agent loads 
 | [code-reviewer](agents/code-reviewer.md) | "review this code", "PR review", "health check", "conventions" | MCP-driven multi-dimensional review, convention detection and enforcement |
 | [build-error-resolver](agents/build-error-resolver.md) | "fix build", "build errors", "won't compile" | Autonomous build-fix loop: parse errors → categorize → fix → rebuild |
 | [refactor-cleaner](agents/refactor-cleaner.md) | "clean up", "dead code", "de-sloppify" | Systematic cleanup: dead code removal, formatting, sealing, CancellationToken |
+| [app-engineer](agents/app-engineer.md) | "CLI", "console app", "dotnet tool", "desktop", "WPF", "Avalonia", "MVVM", "Native AOT" | Command trees and exit codes, MVVM view models, Avalonia controls, AOT/trimmed publishing |
 
-## Templates (5)
+## Templates (7)
 
 Drop-in `CLAUDE.md` files that configure Claude for specific project types. Copy one file, replace the placeholders, done.
 
@@ -327,6 +345,8 @@ Drop-in `CLAUDE.md` files that configure Claude for specific project types. Copy
 | [blazor-app](templates/blazor-app/) | Blazor Server / WASM / Auto | Component organization, render mode strategy, bUnit testing |
 | [worker-service](templates/worker-service/) | Background processing | BackgroundService patterns, Wolverine/MassTransit consumers, proper cancellation |
 | [class-library](templates/class-library/) | NuGet packages, shared libraries | Public API design, XML docs, semantic versioning, SourceLink |
+| [console-cli](templates/console-cli/) | Console apps, CLI tools, dotnet tools | System.CommandLine 2.x, exit codes, stdio discipline, tool packaging, Native AOT |
+| [desktop-app](templates/desktop-app/) | Avalonia, WPF, WinForms, MAUI | MVVM with CommunityToolkit.Mvvm, Generic Host, UI threading, per-OS publishing |
 
 ## Roslyn MCP Server
 
@@ -353,11 +373,73 @@ Token-efficient codebase navigation via Roslyn semantic analysis. Instead of Cla
 | `get_file_outline` | Type/member skeleton of a file, no bodies | Reading the file to see what's in it |
 | `get_nuget_packages` | PackageReference inventory with CPM awareness | Parsing csproj/props files manually |
 | `get_endpoint_map` | Route inventory with auth posture per endpoint | Grepping Map*/controllers by hand |
-| `get_di_registrations` | DI map: lifetimes, duplicates, captive risks | Reading Program.cs and extensions |
+| `get_di_registrations` | DI map: lifetimes, duplicates, captive risks (MS.DI, Prism, Autofac) | Reading Program.cs and extensions |
+| `resolve_stack_trace` | Maps an exception's frames to file:line in your own code | Reading the trace and hunting for each method |
+| `analyze_change_impact` | "What breaks if I change this?" — callers, implementers, affected tests | Chaining several reference searches |
+| `get_token_savings` | Measured tokens saved in this repo, per-tool leaderboard (opt-in, local only) | Guessing whether the tools pay off |
+| `get_symbol_at` | The symbol at a file position: kind, signature, definition, declared types | Reading the file around a line number |
+| `preview_rename` | What a semantic rename would change, without writing anything | Grepping the name and guessing which hits are real |
+| `get_workspace_status` | What is loaded, warm-up progress, and any project that loaded incompletely | Wondering why a search came back empty |
 
-The MCP server starts automatically via `.mcp.json`. No manual setup required.
+Once the `CWM.RoslynNavigator` global tool is installed, the plugin's `.mcp.json` starts the server automatically. The server loads analyzers from shadow copies, so it never locks files in `~/.nuget/packages` or blocks `dotnet restore`.
 
 See [mcp/CWM.RoslynNavigator/README.md](mcp/CWM.RoslynNavigator/README.md) for details.
+
+### Benchmarks
+
+We measured the navigator on five open-source .NET solutions, from a 9-project template to a 270-project framework, in two ways. First, real Claude Code sessions answering the same questions with and without the navigator. Second, the published 0.8.0 against the current build. Everything ran on one machine (Windows, 24 threads, .NET SDK 10.0.403) on 2026-11-04.
+
+#### Real Claude Code sessions: with vs without the navigator
+
+Without the navigator, Claude Code answers a code question with its built-in Grep, Glob and Read tools, and most AI coding agents work the same way. We asked Claude Code (Sonnet 5.5) 11 everyday questions on each solution, such as "Which methods call `AbpModule.IsAbpModule`?", "Which classes implement `IShape`?" and "Map this stack trace to the source". Each question ran as a fresh headless session, once with only the default tools and once with the navigator added. Time runs from asking to the final answer and includes every model round trip. A separate, blinded judge session then scored each answer from 0 to 100 for correctness and completeness.
+
+| Size | Solution | Projects | Time for 11 questions | Accuracy (0–100) | Tool calls | Cost |
+|---|---|---:|---:|---:|---:|---:|
+| Small | [CleanArchitecture](https://github.com/ardalis/CleanArchitecture) | 9 | 112 s → **62 s** | 59 → **95** | 23 → **16** | $0.34 → **$0.20** |
+| Small | [eShop](https://github.com/dotnet/eShop) | 28 | 90 s → **64 s** | 78 → **95** | 17 → **11** | $0.26 → **$0.25** |
+| Medium | [Jellyfin](https://github.com/jellyfin/jellyfin) | 41 | 168 s → **127 s** | 70 → **93** | 27 → **11** | $0.69 → **$0.44** |
+| Large | [OrchardCore](https://github.com/OrchardCMS/OrchardCore) | 257 | 179 s → **133 s** | 48 → **91** | 35 → **11** | $0.53 → $0.55 |
+| XL | [ABP Framework](https://github.com/abpframework/abp) | 270 | 186 s → **116 s** | 49 → **86** | 35 → **13** | $0.55 → $0.63 |
+| | **All 55 questions** | | **734 s → 502 s (−32%)** | **61 → 92** | **137 → 62** | **$2.37 → $2.08 (−12%)** |
+
+With the navigator, Claude answered faster on 48 of the 55 questions and more accurately on 53. The median question took 7.6 s instead of 11.9 s, 52 answers scored 80 or more (17 without it), and on the two largest solutions it needed about a third of the tool calls. Speed is the smaller part of the story. Without the navigator, Claude answers from Grep's matching lines instead of opening every file, which is quick but often wrong:
+
+| Question | Without the navigator | With the navigator |
+|---|---|---|
+| Which methods call `BaseItem.GetParent`? (Jellyfin) | 33.3 s, 6 tool calls, accuracy 40 | 9.2 s, 1 tool call, accuracy 100 |
+| Which methods call `AbpModule.IsAbpModule`? (ABP) | 13.5 s, 4 tool calls, accuracy 40 | 9.9 s, 1 tool call, accuracy 100 |
+| Show the type hierarchy of `AbpModule` (ABP) | 15.7 s, 6 tool calls, accuracy 30 | 12.0 s, 1 tool call, accuracy 88 |
+| Show the type hierarchy of `StartupBase` (OrchardCore) | 20.9 s, 6 tool calls, accuracy 60 | 10.0 s, 1 tool call, accuracy 88 |
+
+A few honest notes:
+
+- **The cost saving is smaller on the largest solutions.** The navigator now returns complete answers (all 525 usages of an interface, all 317 derived types) where it used to stop at 50–100, and those answers are bigger. OrchardCore and ABP cost slightly more with the navigator; the three smaller solutions cost less.
+- **It is not faster on every question.** 7 of the 55 were slower, mostly ones that returned a very large list.
+- **It's one session per question per arm.** Model runs vary, so trust the totals more than any single row.
+- **The judge is a model, not a human reviewer.** It is blinded to which arm wrote which answer. It checks each answer against the navigator's compiler-backed output and is told not to penalise correct items missing from it.
+- **Both arms ran without Bash**, so neither could run `rg` or `dotnet build`.
+- **Navigator startup isn't in these times.** It is in the next table.
+
+#### Before vs after: the published 0.8.0 vs the current build
+
+"Ready" is the time from server start until it answers instead of saying "loading". The first start on a machine runs the full MSBuild load. After that, the load is restored from a persistent cache and checked in the background, so OrchardCore and ABP are ready in about 3 seconds instead of 45–100.
+
+| Solution | Ready (before → after) | Ready, second start (load cache) | `find_dead_code` | `get_test_coverage_map` | `detect_antipatterns` |
+|---|---:|---:|---:|---:|---:|
+| CleanArchitecture | 7.6 s → **3.2 s** | **1.3 s** | 0.49 s → **0.08 s** | 0.89 s → **0.02 s** | 0.31 s → **0.12 s** |
+| eShop | 8.5 s → **4.5 s** | **1.4 s** | 1.3 s → **0.16 s** | 4.6 s → **0.05 s** | 0.62 s → **0.23 s** |
+| Jellyfin | 12.7 s → **8.5 s** | **1.7–2.2 s** | 13.7 s → **1.0 s** | 16.0 s → **0.16 s** | 2.8 s → **2.4 s** |
+| OrchardCore | 93.5 s → **44.4 s** | **2.8–3.6 s** | 25.1 s → **0.9 s** | 11.4 s → **0.18 s** | 50.0 s → **0.3 s** |
+| ABP Framework | 77.2 s → **47.2 s** | **2.4–2.5 s** | 15.5 s → **0.9 s** | 12.6 s → **0.26 s** | 4.9 s → **0.39 s** |
+
+Tool times are the first call after warm-up, so they include any compilation the tool needs. After that, navigation calls such as `find_symbol`, `get_symbol_source` and `get_type_hierarchy` answer in 1–10 ms at every size, and `analyze_change_impact` (new since 0.8.0) answers in about 1 s on OrchardCore, down from 54 s in an earlier build.
+
+A few honest notes:
+
+- Some first calls are no faster than 0.8.0. On OrchardCore, the first `find_references` and `find_callers` take 1.6–1.8 s against 1.0–1.2 s, because those searches now cover interface and base-class callers.
+- Faster loading on eShop and ABP comes from loading through several MSBuild processes at once, which uses more memory while it runs (ABP peaked at 4.5 GB). Use `--load-parallelism 1` if memory matters more than startup time.
+
+Full results: [the A/B report](mcp/CWM.RoslynNavigator/bench/results/2026-11-04-ab-v2/report.md) has every question, answer, score and token count. [The server benchmark](mcp/CWM.RoslynNavigator/bench/results/2026-11-04-final/report.md) has per-tool latency, memory, and response sizes. To run either yourself, see [the A/B harness](mcp/CWM.RoslynNavigator/bench/ab/README.md) and [the benchmark harness](mcp/CWM.RoslynNavigator/bench/README.md).
 
 ## Knowledge Base
 
@@ -379,8 +461,8 @@ Three Claude Code hooks run automatically (declared in `hooks/hooks.json`); the 
 
 | Script | Kind | What It Does |
 |------|-------|-------------|
-| `pre-bash-guard.sh` | Claude Code hook — PreToolUse (Bash) | Blocks destructive git ops (force push, reset --hard), warns on risky commands |
-| `post-edit-format.sh` | Claude Code hook — PostToolUse (*.cs) | Auto-formats C# files after edits |
+| `pre-bash-guard.sh` | Claude Code hook — PreToolUse (Bash) | Parses each command and blocks destructive ones (force push, `reset --hard`, `clean -f`, `rm -rf` outside build output) plus machine-wide ones (`pkill`, `dotnet build-server shutdown`, deleting NuGet caches). A command that only *mentions* one, like a grep pattern or a commit message, passes ([ADR-007](knowledge/decisions/007-command-word-guard.md)) |
+| `post-edit-format.sh` | Claude Code hook — PostToolUse (*.cs) | Auto-formats C# files after edits, and prints the error if `dotnet format` fails |
 | `post-scaffold-restore.sh` | Claude Code hook — PostToolUse (*.csproj) | `dotnet restore` after project file changes |
 | `pre-commit-format.sh` | Git pre-commit (manual install) | `dotnet format --verify-no-changes` ensures consistent formatting |
 | `pre-commit-antipattern.sh` | Git pre-commit (manual install) | Detects `async void`, sync-over-async, `new HttpClient()`, and `DateTime.Now` in the lines a commit adds ([why text, not an analyzer](knowledge/decisions/006-three-tier-antipattern-detection.md)) |
@@ -408,12 +490,12 @@ Every default is documented with an ADR explaining **why**:
 dotnet-claude-kit/
 ├── CLAUDE.md                    # Instructions for developing THIS repo
 ├── AGENTS.md                    # Agent routing & orchestration
-├── agents/                      # 10 specialist agents
-├── skills/                      # 47 skills (incl. 16 slash-command workflows)
+├── agents/                      # 11 specialist agents
+├── skills/                      # 52 skills (incl. 17 slash-command workflows)
 ├── .claude/rules/               # 10 always-loaded rules
-├── templates/                   # 5 drop-in CLAUDE.md templates
+├── templates/                   # 7 drop-in CLAUDE.md templates
 ├── knowledge/                   # Living reference documents + ADRs
-├── mcp/CWM.RoslynNavigator/     # Roslyn MCP server (22 tools)
+├── mcp/CWM.RoslynNavigator/     # Roslyn MCP server (26 tools)
 ├── mcp-configs/                 # MCP server config templates
 ├── hooks/                       # Claude Code hooks + git hooks + utilities
 ├── docs/                        # Shorthand + longform guides
@@ -436,6 +518,7 @@ dotnet-claude-kit works with multiple AI coding tools:
 | **Cursor** | `.cursor/rules/dotnet-rules.md` | Consolidated .NET rules for Cursor IDE |
 | **Codex CLI** | `.codex/AGENTS.md` | Agent configuration pointing to skills and agents |
 | **OpenCode** | `opencode.json` + `.opencode/AGENTS.md` | Roslyn MCP server, consolidated rules, and agent/skill catalog |
+| **APM** (Claude, Copilot, Cursor, Codex) | Repo layout as-is | `apm install codewithmukesh/dotnet-claude-kit --target <tool>` deploys skills, agents, hooks, and the MCP server |
 
 ## Documentation
 

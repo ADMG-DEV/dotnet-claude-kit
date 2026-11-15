@@ -24,11 +24,11 @@ public static class GetTestCoverageMapTool
         "WireMock.Net"
     ];
 
-    [McpServerTool(Name = "get_test_coverage_map"), Description("Heuristic test coverage map: identifies which production types have corresponding test classes. Matches by naming convention (e.g., OrderService → OrderServiceTests). Not runtime coverage — structural analysis only. IMPORTANT: this metric is only valid for suites written one test class per production type. For integration- or feature-driven suites it returns applicable=false with the real test-method count; in that case the percentage is meaningless and must not be graded or reported as coverage.")]
+    [McpServerTool(Name = "get_test_coverage_map"), Description("Which production types have a test class named after them (OrderServiceTests for OrderService). Structural, not runtime coverage. When applicable=false (integration or feature-style suites) the percentage is meaningless: do not report it as coverage.")]
     public static async Task<string> ExecuteAsync(
         WorkspaceManager workspace,
-        [Description("Optional: production project name to check coverage for")] string? projectFilter = null,
-        [Description("Maximum results to return")] int maxResults = 50,
+        [Description("Production project name")] string? projectFilter = null,
+        int maxResults = 50,
         CancellationToken ct = default)
     {
         var notReady = await workspace.EnsureReadyOrStatusAsync(ct);
@@ -36,31 +36,28 @@ public static class GetTestCoverageMapTool
 
         var solution = workspace.GetSolution();
         if (solution is null)
-            return JsonSerializer.Serialize(new TestCoverageMapResult([], 0, 0, 0));
+            return ToolJson.Serialize(new TestCoverageMapResult([], 0, 0, 0));
 
         // Identify test projects vs production projects
         var testProjects = new List<Project>();
         var productionProjects = new List<Project>();
         var usesIntegrationHarness = false;
 
+        // Classification reads metadata references only, so it never forces a compilation.
         foreach (var project in solution.Projects)
         {
-            var compilation = await workspace.GetCompilationAsync(project.Id, ct);
-
-            if (SourceClassifier.IsTestProject(project, compilation))
-            {
+            if (SourceClassifier.IsTestProject(project))
                 testProjects.Add(project);
-                usesIntegrationHarness |= ReferencesIntegrationHarness(compilation);
-            }
             else
-            {
                 productionProjects.Add(project);
-            }
         }
 
         // Filter production projects if specified
         if (projectFilter is not null)
         {
+            if (ArgumentChecks.UnknownProject(solution, projectFilter) is { } unknown)
+                return unknown;
+
             productionProjects = productionProjects
                 .Where(p => p.Name.Equals(projectFilter, StringComparison.OrdinalIgnoreCase))
                 .ToList();
@@ -71,6 +68,7 @@ public static class GetTestCoverageMapTool
         var testTypeFiles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var testMethodCount = 0;
         var testClassCount = 0;
+        var seenTestFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var testProject in testProjects)
         {
@@ -79,12 +77,18 @@ public static class GetTestCoverageMapTool
             var compilation = await workspace.GetCompilationAsync(testProject.Id, ct);
             if (compilation is null) continue;
 
+            usesIntegrationHarness |= ReferencesIntegrationHarness(compilation);
+
             foreach (var tree in compilation.SyntaxTrees)
             {
+                // A multi-targeted test project compiles each file once per framework.
+                if (!seenTestFiles.Add(tree.FilePath ?? ""))
+                    continue;
+
                 var semanticModel = compilation.GetSemanticModel(tree);
                 var root = await tree.GetRootAsync(ct);
 
-                foreach (var node in root.DescendantNodes())
+                foreach (var node in DeclarationNodes.Members(root))
                 {
                     // Count actual tests, which is the number the structural metric hides.
                     if (node is MethodDeclarationSyntax method
@@ -110,6 +114,7 @@ public static class GetTestCoverageMapTool
         // Check each production type for matching test class
         var coverage = new List<TestCoverageEntry>();
         var totalTypes = 0;
+        var countedTypes = new HashSet<(string?, int, string)>();
         var testedTypes = 0;
 
         foreach (var project in productionProjects)
@@ -130,13 +135,18 @@ public static class GetTestCoverageMapTool
                 var semanticModel = compilation.GetSemanticModel(tree);
                 var root = await tree.GetRootAsync(ct);
 
-                foreach (var node in root.DescendantNodes())
+                foreach (var node in DeclarationNodes.Types(root))
                 {
                     var symbol = semanticModel.GetDeclaredSymbol(node, ct);
                     if (symbol is not INamedTypeSymbol typeSymbol) continue;
                     if (typeSymbol.TypeKind is not (TypeKind.Class or TypeKind.Struct)) continue;
                     if (typeSymbol.IsAbstract && typeSymbol.TypeKind == TypeKind.Class
                         && typeSymbol.GetMembers().All(m => m.IsAbstract || m.IsImplicitlyDeclared)) continue;
+
+                    // One type per declaration, not per target-framework flavor of its project.
+                    var declared = SymbolResolver.GetLocation(typeSymbol);
+                    if (!countedTypes.Add((declared?.File, declared?.Line ?? 0, typeSymbol.Name)))
+                        continue;
 
                     totalTypes++;
 
@@ -164,7 +174,7 @@ public static class GetTestCoverageMapTool
         var notApplicableReason = DetermineNotApplicableReason(
             percentage, testMethodCount, totalTypes, usesIntegrationHarness);
 
-        return JsonSerializer.Serialize(new TestCoverageMapResult(
+        return ToolJson.Serialize(new TestCoverageMapResult(
             coverage,
             totalTypes,
             testedTypes,

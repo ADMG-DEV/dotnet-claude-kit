@@ -1,0 +1,38 @@
+{
+  "References": [
+    {
+      "File": "SampleApi/OrderService.cs",
+      "Line": 10,
+      "Snippet": "private readonly IOrderRepository _repository;",
+      "Kind": "usage"
+    },
+    {
+      "File": "SampleApi/OrderService.cs",
+      "Line": 12,
+      "Snippet": "public OrderService(IOrderRepository repository)",
+      "Kind": "parameter"
+    },
+    {
+      "File": "SampleInfrastructure/CachedOrderRepository.cs",
+      "Line": 8,
+      "Snippet": "public class CachedOrderRepository(IOrderRepository inner) : IOrderRepository",
+      "Kind": "inheritance"
+    },
+    {
+      "File": "SampleInfrastructure/CachedOrderRepository.cs",
+      "Line": 8,
+      "Snippet": "public class CachedOrderRepository(IOrderRepository inner) : IOrderRepository",
+      "Kind": "parameter"
+    },
+    {
+      "File": "SampleInfrastructure/InMemoryOrderRepository.cs",
+      "Line": 8,
+      "Snippet": "public class InMemoryOrderRepository : IOrderRepository",
+      "Kind": "inheritance"
+    }
+  ],
+  "Count": 5,
+  "TotalFound": 5,
+  "Truncated": false,
+  "Limit": 1000
+}

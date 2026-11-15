@@ -18,61 +18,141 @@ public static class GetDiRegistrationsTool
         "TryAddKeyedSingleton", "TryAddKeyedScoped", "TryAddKeyedTransient",
     ];
 
-    [McpServerTool(Name = "get_di_registrations"), Description("Map of dependency-injection registrations from Add{Singleton,Scoped,Transient}/AddKeyed*/TryAdd* calls: service, implementation, lifetime, and file:line. Flags duplicate registrations of the same service (which may be intentional multi-registration) and captive-dependency risks — a singleton implementation whose constructor takes a service registered as scoped. Best-effort static analysis: factory-lambda registrations report '(factory)' as the implementation, matching is by type name, and registrations built via reflection, Scrutor scanning, or extension-method indirection are not seen.")]
+    [McpServerTool(Name = "get_di_registrations"), Description("Dependency-injection registrations (Microsoft.Extensions.DependencyInjection, Prism, Autofac): service, implementation, lifetime, file and line, flagging duplicates and captive dependencies (singleton taking a scoped service). Static: assembly scanning, reflection, and extension-method indirection are missed; a Note lists unmapped containers, so Count 0 with a Note does not mean no DI.")]
     public static async Task<string> ExecuteAsync(
         WorkspaceManager workspace,
-        [Description("Optional: filter to registrations in files whose path contains this value")] string? file = null,
-        [Description("Maximum registrations to return. TotalFound in the response reports the full count; re-query with a higher value if it exceeds Count. Duplicates and captive risks are always computed from the full set.")] int maxResults = 100,
+        [Description("Path substring filter")] string? file = null,
+        int maxResults = 500,
+        int? offset = null,
+        string? format = null,
         CancellationToken ct = default)
     {
         var notReady = await workspace.EnsureReadyOrStatusAsync(ct);
         if (notReady is not null) return notReady;
+        if (ListFormat.Validate(format) is { } invalid) return invalid;
 
         var solution = workspace.GetSolution();
         if (solution is null)
-            return JsonSerializer.Serialize(new DiRegistrationsResult(
+            return ToolJson.Serialize(new DiRegistrationsResult(
                 [], [], [], 0, 0, false, Math.Max(1, maxResults)));
 
-        var registrations = new List<DiRegistration>();
-        var typeDeclarations = new Dictionary<string, TypeDeclarationSyntax>(StringComparer.Ordinal);
         var seenFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var documents = solution.Projects
+            .SelectMany(p => p.Documents)
+            .Where(d => d.FilePath is not null && seenFiles.Add(d.FilePath))
+            .ToArray();
 
-        foreach (var document in solution.Projects.SelectMany(p => p.Documents))
+        // Every document is still scanned (type lookups span files), but a filter naming no
+        // file is a mistake to report, not "this file registers nothing".
+        if (file is not null && !documents.Any(d => d.FilePath!.Contains(file, StringComparison.OrdinalIgnoreCase)))
+            return ArgumentChecks.FileFilterMatchesNothing(file);
+
+        // Files are analysed in parallel into per-document slots, then merged in document
+        // order so first-wins type lookup, registration order and truncation match a
+        // sequential pass exactly.
+        var scans = new DocumentScan[documents.Length];
+
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, documents.Length),
+            new ParallelOptions { CancellationToken = ct },
+            async (index, token) => scans[index] = await ScanDocumentAsync(documents[index], file, workspace, token));
+
+        var registrations = new List<DiRegistration>();
+        var projects = new List<string>();
+        var typeDeclarations = new Dictionary<string, TypeDeclarationSyntax>(StringComparer.Ordinal);
+        var unrecognized = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        for (var index = 0; index < scans.Length; index++)
         {
-            ct.ThrowIfCancellationRequested();
-
-            if (document.FilePath is null || !seenFiles.Add(document.FilePath))
-                continue;
-
-            var root = await document.GetSyntaxRootAsync(ct);
-            if (root is null) continue;
-
-            // Collect type declarations solution-wide for captive-dependency analysis
-            foreach (var typeDecl in root.DescendantNodes().OfType<TypeDeclarationSyntax>())
+            var scan = scans[index];
+            foreach (var typeDecl in scan.TypeDeclarations)
                 typeDeclarations.TryAdd(typeDecl.Identifier.Text, typeDecl);
 
-            if (file is not null && !SourcePaths.ContainsPath(document.FilePath, file))
-                continue;
+            registrations.AddRange(scan.Registrations);
+            projects.AddRange(Enumerable.Repeat(ListFormat.ProjectName(documents[index].Project), scan.Registrations.Count));
 
-            foreach (var registration in AnalyzeRoot(root, document.FilePath))
-            {
-                registrations.Add(registration with { File = workspace.ToRelativePath(registration.File) });
-            }
+            foreach (var (label, count) in scan.Unrecognized)
+                unrecognized[label] = unrecognized.GetValueOrDefault(label) + count;
         }
 
-        var duplicates = FindDuplicates(registrations);
+        var allDuplicates = FindDuplicates(registrations);
+        var duplicates = allDuplicates
+            .OrderByDescending(d => d.Count)
+            .ThenBy(d => d.Service, StringComparer.Ordinal)
+            .Take(MaxDuplicates)
+            .ToList();
+        int? duplicateCount = allDuplicates.Count > duplicates.Count ? allDuplicates.Count : null;
         var captiveRisks = FindCaptiveRisks(registrations, typeDeclarations);
+        var note = DiContainerSupport.BuildNote(registrations.Count, unrecognized);
 
-        var page = Paging.Apply(registrations, maxResults);
+        var page = Paging.Apply(registrations, maxResults, offset ?? 0);
+        var byLifetime = registrations.Count > 0 ? ListFormat.CountBy(registrations, r => r.Lifetime) : null;
+        var byProject = page.Truncated || page.Offset > 0 ? ListFormat.CountBy(projects, p => p) : null;
 
-        return JsonSerializer.Serialize(new DiRegistrationsResult(
-            page.Items, duplicates, captiveRisks, page.Count, page.TotalFound, page.Truncated, page.Limit));
+        return ListFormat.Render(
+            page,
+            format,
+            p => ToolJson.Serialize(new DiRegistrationsResult(
+                p.Items, duplicates, captiveRisks, p.Count, p.TotalFound, p.Truncated, p.Limit, note, p.Offset, p.NextOffset,
+                ByLifetime: byLifetime, ByProject: byProject, DuplicateCount: duplicateCount)),
+            p => ToolJson.Serialize(new DiRegistrationsResult(
+                null, duplicates, captiveRisks, p.Count, p.TotalFound, p.Truncated, p.Limit, note, p.Offset, p.NextOffset,
+                Files: ListFormat.GroupByFile(p.Items, r => r.File, CompactEntry),
+                ByLifetime: byLifetime, ByProject: byProject, DuplicateCount: duplicateCount)));
+    }
+
+    /// <summary>Most duplicated services listed; a large modular app registers hundreds of multi-registrations.</summary>
+    private const int MaxDuplicates = 25;
+
+    /// <summary>"505 singleton IFoo -> Foo keyed try"; the arrow is omitted when the service is its own implementation.</summary>
+    private static string CompactEntry(DiRegistration r) =>
+        $"{r.Line} {r.Lifetime} {r.Service}{(r.Implementation == r.Service ? "" : $" -> {r.Implementation}")}{(r.Keyed ? " keyed" : "")}{(r.TryAdd ? " try" : "")}";
+
+    private sealed record DocumentScan(
+        List<TypeDeclarationSyntax> TypeDeclarations,
+        List<DiRegistration> Registrations,
+        Dictionary<string, int> Unrecognized);
+
+    private static async Task<DocumentScan> ScanDocumentAsync(
+        Document document,
+        string? file,
+        WorkspaceManager workspace,
+        CancellationToken ct)
+    {
+        var unrecognized = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        var root = await document.GetSyntaxRootAsync(ct);
+        if (root is null)
+            return new DocumentScan([], [], unrecognized);
+
+        // Collect type declarations solution-wide for captive-dependency analysis
+        var typeDeclarations = root.DescendantNodes().OfType<TypeDeclarationSyntax>().ToList();
+
+        if (file is not null && !document.FilePath!.Contains(file, StringComparison.OrdinalIgnoreCase))
+            return new DocumentScan(typeDeclarations, [], unrecognized);
+
+        // Only pay for a semantic model when the file has Register*/Bind*/For calls worth resolving
+        var model = root.DescendantNodes().OfType<InvocationExpressionSyntax>().Any(DiContainerSupport.IsContainerCandidate)
+            ? await document.GetSemanticModelAsync(ct)
+            : null;
+
+        var registrations = AnalyzeRoot(root, document.FilePath!, model, unrecognized)
+            .Select(registration => registration with { File = workspace.ToRelativePath(registration.File) })
+            .ToList();
+
+        return new DocumentScan(typeDeclarations, registrations, unrecognized);
     }
 
     /// <summary>
-    /// Syntax-only registration extraction for one file. Internal for direct unit testing.
+    /// Registration extraction for one file. Microsoft DI is matched syntactically by method name;
+    /// Prism and Autofac need a <paramref name="model"/> (matched by receiver type). Calls on other
+    /// known containers are counted into <paramref name="unrecognized"/>. Internal for direct unit testing.
     /// </summary>
-    internal static List<DiRegistration> AnalyzeRoot(SyntaxNode root, string filePath)
+    internal static List<DiRegistration> AnalyzeRoot(
+        SyntaxNode root,
+        string filePath,
+        SemanticModel? model = null,
+        Dictionary<string, int>? unrecognized = null)
     {
         var results = new List<DiRegistration>();
 
@@ -83,7 +163,12 @@ public static class GetDiRegistrationsTool
 
             var methodName = access.Name.Identifier.Text;
             if (!RegistrationMethods.Contains(methodName))
+            {
+                if (model is not null && DiContainerSupport.IsContainerCandidate(invocation))
+                    DiContainerSupport.TryAnalyze(invocation, access, model, filePath, results, unrecognized);
+
                 continue;
+            }
 
             var lifetime = methodName.Contains("Singleton") ? "singleton"
                 : methodName.Contains("Scoped") ? "scoped"
@@ -115,10 +200,15 @@ public static class GetDiRegistrationsTool
             if (service is null)
                 continue; // instance/factory-only overload without a resolvable type
 
-            var hasFactory = invocation.ArgumentList.Arguments
+            var arguments = invocation.ArgumentList.Arguments;
+            var hasFactory = arguments
                 .Any(a => a.Expression is SimpleLambdaExpressionSyntax or ParenthesizedLambdaExpressionSyntax);
 
-            implementation ??= hasFactory ? "(factory)" : service;
+            // AddSingleton<IFoo>(existing) registers an instance; reporting IFoo as its own
+            // implementation read as "IFoo is a concrete type".
+            var hasInstance = !hasFactory && access.Name is GenericNameSyntax && arguments.Count > 0;
+
+            implementation ??= hasFactory ? "(factory)" : hasInstance ? "(instance)" : service;
 
             results.Add(new DiRegistration(
                 Service: service,
@@ -166,7 +256,7 @@ public static class GetDiRegistrationsTool
         foreach (var registration in registrations.Where(r => r.Lifetime == "singleton"))
         {
             var implName = SimpleTypeName(registration.Implementation);
-            if (implName == "(factory)" || !typeDeclarations.TryGetValue(implName, out var typeDecl))
+            if (implName is "(factory)" or "(instance)" || !typeDeclarations.TryGetValue(implName, out var typeDecl))
                 continue;
 
             foreach (var parameter in ConstructorParameters(typeDecl))

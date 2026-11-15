@@ -2,7 +2,8 @@ using CWM.RoslynNavigator.Tests.Fixtures;
 
 namespace CWM.RoslynNavigator.Tests;
 
-public class SymbolResolverTests(TestSolutionFixture fixture) : IClassFixture<TestSolutionFixture>
+[Collection(SampleSolutionCollection.Name)]
+public class SymbolResolverTests(TestSolutionFixture fixture)
 {
     [Theory]
     [InlineData("GetByIdAsync", "GetByIdAsync")]
@@ -13,7 +14,7 @@ public class SymbolResolverTests(TestSolutionFixture fixture) : IClassFixture<Te
     [InlineData("IRepository`1.GetByIdAsync", "IRepository.GetByIdAsync")]
     [InlineData("Outer<T>.Inner<TKey, TValue>.Run(int x)", "Outer.Inner.Run")]
     [InlineData("", "")]
-    public void NormalizeRequestedName_StripsNoiseButKeepsSegments(string input, string expected)
+    public void NormalizeRequestedName_DecoratedName_StripsNoiseButKeepsSegments(string input, string expected)
     {
         Assert.Equal(expected, SymbolResolver.NormalizeRequestedName(input));
     }
@@ -22,7 +23,7 @@ public class SymbolResolverTests(TestSolutionFixture fixture) : IClassFixture<Te
     [InlineData("GetByIdAsync", "GetByIdAsync")]
     [InlineData("OrderService.GetOrderAsync", "GetOrderAsync")]
     [InlineData("SampleApi.OrderService.GetOrderAsync", "GetOrderAsync")]
-    public void GetSimpleName_ReturnsFinalSegment(string input, string expected)
+    public void GetSimpleName_QualifiedName_ReturnsFinalSegment(string input, string expected)
     {
         Assert.Equal(expected, SymbolResolver.GetSimpleName(input));
     }
@@ -116,5 +117,23 @@ public class SymbolResolverTests(TestSolutionFixture fixture) : IClassFixture<Te
 
         Assert.NotNull(symbol);
         Assert.Equal("IProductRepository", symbol.ContainingType.Name);
+    }
+
+    [Fact]
+    public async Task FindSymbolsByNameAsync_NameInSeveralProjects_ReturnsThemInProjectOrder()
+    {
+        // Arrange — the lookup runs per compilation in parallel; the merge must not reorder.
+        var expected = new List<Microsoft.CodeAnalysis.ISymbol>();
+        foreach (var compilation in await fixture.WorkspaceManager.GetAllCompilationsAsync(TestContext.Current.CancellationToken))
+            expected.AddRange(compilation.GetSymbolsWithName("GetByIdAsync", Microsoft.CodeAnalysis.SymbolFilter.All, TestContext.Current.CancellationToken));
+
+        // Act
+        var symbols = await SymbolResolver.FindSymbolsByNameAsync(fixture.WorkspaceManager, "GetByIdAsync", ct: TestContext.Current.CancellationToken);
+
+        // Assert
+        Assert.True(symbols.Count >= 3, "IOrderRepository and both repositories declare it");
+        Assert.Equal(
+            expected.Distinct(Microsoft.CodeAnalysis.SymbolEqualityComparer.Default).Select(s => s.ToDisplayString()),
+            symbols.Select(s => s.ToDisplayString()));
     }
 }

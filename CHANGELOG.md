@@ -5,6 +5,132 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Performance
+Measured on a 39-project, 3,750-document solution (warm workspace, second call):
+
+| Tool | Before | After |
+|---|---|---|
+| `find_dead_code` (default) | 22.8s | 2.1s |
+| `get_test_coverage_map` | 10.0s | 0.04s |
+| `detect_circular_dependencies` (types) | 14.4s | 0.1s |
+| `detect_antipatterns` | 2.1s | 0.6s |
+| `get_endpoint_map` / `get_di_registrations` | 0.66s / 0.57s | 0.08s / 0.09s |
+| `resolve_stack_trace` (90 frames) | 47ms | 3ms |
+
+- **Scan tools walk declarations only.** `GetDeclaredSymbol` on every node forced Roslyn to bind every method body just to find types and members
+- **Dead-code pre-filter is one pass.** It used to run `IndexOf` over every file's text for every candidate (quadratic); now it uses a single identifier index with the same rule
+- **Test projects are detected from metadata references** instead of compiling every project (22s → 9ms cold)
+- Anti-pattern, endpoint, and DI scans run files in parallel with deterministic output order; stack traces resolve each distinct method once
+- `get_test_coverage_map` no longer counts anonymous types and tuples as untested production types, which had deflated the percentage
+- The navigator's own test suite shares one solution fixture (~26s → ~15s)
+
+### Testing (navigator)
+- **604 → 860 tests**, line coverage 79.5% → 81.6% with an 80% floor enforced in CI, and the suite runs on Windows, macOS, and Linux
+- **Every tool is contract-tested automatically by reflection:** not-ready and error states, and prompt cancellation, so a new tool can't ship without them
+- **End-to-end over real MCP stdio:** the built server is spawned, `tools/list` must match the assembly, and every tool is called with valid and invalid arguments
+- **Response and schema snapshots** catch silent contract changes (renamed fields change how agents call tools)
+- **Scale tests on generated 50/200/500-project solutions** with relative time budgets, response-size and memory ceilings, in a separate CI job. At 500 projects, load takes 45s and the heavy tools stay under 130ms except `find_dead_code`
+- TestData is isolated from the server's own build files, and the sample gained a test project so the coverage map's scan path runs
+- **Ready as soon as the solution opens** (20–29s → 8–10s on the same solution). Compilations now warm in the background at full parallelism, and cold symbol lookups compile projects concurrently. The 50-project lazy-load threshold is gone because every size now warms in the background
+- **New files no longer force a full reload.** A new `.cs` file in an SDK-style project is added in place on the next call (~1.5s, previously a 14–16s blocking reload after up to 60s). Projects with custom compile items still fall back to a reload. Files a project excludes no longer trigger a reload every 60 seconds
+- **Per-call change detection** uses directory listings instead of statting every document (~110ms → ~10ms per call). Deleted files are now dropped instead of lingering in results
+- Opt-in telemetry does its measuring off the request path (first recorded call 75ms → ~0ms)
+- **Large solutions load through several build hosts.** Almost all of a large load is MSBuild evaluating projects one at a time in one build host (OrchardCore: 47 of 53s). For solutions with 12+ projects the server now splits the project-reference graph into groups and loads each in its own build host, when the graph predicts at least a 1.8× gain. ABP 74s → 53s, eShop 7.2s → 4.5s. OrchardCore stays on one host because its web project references 228 of its 257 projects. Automatic mode allows one host per 4 cores and per 8 GB of RAM; `--load-parallelism N` overrides it
+- **One target framework per multi-targeted project.** The highest `netX.Y` instance is kept, plus any other instance a kept project references or that compiles a file the primary does not. ABP drops from 690 projects / 15,212 documents to 271 / 6,207, server peak memory 1,613 → 1,176 MB, and the 12 benchmark tasks cost 199k → 103k tokens. Code under `#if` for a dropped framework is not indexed; `--all-target-frameworks` restores the old behaviour
+- **Smaller, faster tool responses.** Across the five benchmark solutions the 12 benchmark tasks now cost far fewer tokens: clean-architecture 3.3k → 2.8k, eShop 16.3k → 9.5k, jellyfin 28.4k → 23.8k, OrchardCore 101k → 43.7k, ABP 199k → 30.9k
+  - `get_project_graph` is one entry per csproj with relative paths and only the references the csproj declares (Roslyn reports the transitive closure), paged at 100, with new `summary` and `project` parameters. ABP 173k → 7.8k tokens
+  - `analyze_change_impact` no longer cascades from an interface member to every sibling implementation (a `Dispose` in OrchardCore searched 855 definitions): 54s → 1.2s cold, and the reference count is now correct (2,413 → 342). The caller walk runs in parallel with a 2,000-search cap that sets `Truncated`
+  - `find_dead_code` checks each candidate's references in its own file instead of a solution-wide search per candidate: 8.7s → 0.24s on the 500-project scale test, OrchardCore 4.6s → 0.9s cold
+  - `detect_antipatterns` scans every file in one parallel pass, skips EF checks in projects with no `DbSet`, and lists each rule's message and suggestion once (ABP 3.0s → 0.4s cold, ~12k → ~7k tokens)
+  - File-scope `get_diagnostics` uses the file's own semantic model, falling back to the cached project compilation only for project-wide warnings (ABP 855 → 113ms cold)
+  - Every tool shares one source-generated serializer that omits nulls and default flags (another 3–5% of tokens)
+- **Large solutions are ready in seconds on the second start.** The result of the MSBuild load is saved to a persistent cache (`%LOCALAPPDATA%/cwm-roslyn-navigator/cache`, `~/.cache` on Linux, `~/Library/Caches` on macOS), keyed on the content of every solution, project, `Directory.*`, `global.json` and `NuGet.config` file plus restore output, SDK and navigator version. On a hit the server is Ready straight away, then re-runs the real load in the background and swaps it in only if something changed. OrchardCore 58.5s → ~3s, ABP 99.8s → 2.5s, and all compilations warm in 10–12s and 5.5s. `get_workspace_status` reports where the snapshot came from and how verification went, `--no-load-cache` turns it off, and `CWM_ROSLYN_CACHE_DIR` moves it. Corrupt entries, concurrent writers and unwritable folders fall back to a normal load
+- **Tool definitions cost half as many tokens.** Every request carries all 26 tool definitions, so their size is paid on every turn of every session. Descriptions now say what each tool returns and which neighbour to use instead. Conventions shared by every tool (symbol name forms, file matching, paging fields) are stated once in the MCP server instructions instead of 26 times, and optional parameters no longer carry `["string","null"]` schemas. About 8,000 → 4,100 estimated tokens, held in place by a budget test
+- A `Load profile` log line breaks Ready time into MSBuild, merge, and post-load steps, and the pre-Ready file-timestamp snapshot reads folders in parallel (ABP 0.6s → 0.1s)
+
+### Fixed (navigator)
+- **Large results were cut off or saved to a file instead of answered.** Claude Code writes any MCP result over 50,000 characters to a file, and fixed caps of 50–100 entries hid most of a large answer. Every list tool now fits its page to 30,000 characters, takes `offset` and returns `NextOffset`, and four tools take `format` (`auto` switches to compact per-file strings with per-project counts when the full entries would not fit). ABP's 525 `ITransientDependency` usages come back in three pages instead of 50 rows and a file, OrchardCore's 524 `IShape` usages in one call, and `get_project_graph` lists one `Project -> Refs` line per project (all 270 ABP projects in one call)
+- **`get_endpoint_map` missed controllers that derive from a base controller.** Only the class's own declaration was checked, so Jellyfin (controllers on `BaseJellyfinApiController`) reported 1 endpoint instead of 422. Base classes in any file now count, `[Route]` and `[Authorize]` are inherited, and stacked HTTP attributes, `[action]` and `~/` routes are handled
+- **Derived types, implementations, overrides and callers stopped at one target framework.** When a project loads as more than one framework, Roslyn's searches did not cross between them, so `AbpModule` showed 3 derived types instead of 317. Those searches now start from every framework's copy of the symbol
+- **`resolve_stack_trace` gave declaration lines for traces without line numbers.** Each frame now points at the line that calls the next frame down, and `LineSource` says where the line came from (`trace`, `call` or `declaration`)
+- `get_di_registrations` reports `AddSingleton<IFoo>(instance)` as an instance registration instead of the interface itself, and `get_workspace_status` uses relative paths in load messages (OrchardCore 53.8k → 29.9k characters)
+- **Multi-targeted projects returned duplicate results.** Roslyn loads one project per target framework, so eShop `find_references IBasketService` reported 200 results (truncated) for 8 real locations, and ABP `find_symbol AbpException` returned 5 identical entries. Results are now merged by location before counting and capping, with `TargetFrameworks` listed only for code that exists in some frameworks but not others. `find_callers` also stopped labelling another framework's copy of the target as an interface call
+- **`find_dead_code` skipped every candidate in a multi-targeted project.** Its name pre-filter treated each framework's copy of a file as a separate file. eShop now reports 17 findings instead of 3, and ABP 78 instead of 51
+- **`find_implementations` crashed on fresh clones** with `Unexpected value 'UnresolvedAnalyzerReference'` when an analyzer project had not been built yet (jellyfin, OrchardCore). Unresolved analyzer references are now removed from the snapshot after every load, which changes no answer since they never reach a compilation, and `get_workspace_status` lists each one with a hint to build it
+- **Unknown option values silently meant "everything".** `get_diagnostics scope="galaxy"` returned the whole solution's diagnostics, and `find_dead_code scope="Project"` missed a case-sensitive check and scanned everything. Seven tools now reject unknown values with `InvalidArgument`, and a file or project filter that matches nothing returns `FileNotFound`/`InvalidArgument` instead of an empty result
+- **Tool calls stalled or returned `Loading` during reloads.** After the first load, a `.csproj`/`Directory.*` change now reloads in the background while calls keep answering from the previous snapshot (flagged with a `WorkspaceWarning`), then swaps atomically. Racing callers share one reload, a failed reload keeps the last good snapshot, and old workspaces are disposed only when their last call finishes. Over real stdio with a csproj edit every 7s: 98% → 100% of calls answered, worst call 8.3s → 14ms, 24 → 7 loads for 6 edits
+- **Nested build files were never watched.** `Directory.Build.props`/`.targets`, `Directory.Packages.props`, `global.json`, and `NuGet.config` are now watched in every folder from each project up to the root, as MSBuild resolves them, and so are the `.sln`/`.slnx` files themselves
+- **MCP roots were one-shot.** Discovery retries when no root has a solution yet, `roots/list_changed` is handled, and an explicit `--solution` always wins
+- **The background file scan followed symlinks and junctions** (a junction loop produced 200 paths for one file) and walked `bin/`, `obj/`, `node_modules`, and dot-folders. A cancelled load no longer shows up as `Error`, and path comparisons are case-sensitive on Linux
+- **`find_callers` missed every caller that went through an interface.** Roslyn reports a call made through `IOrderRepository.GetByIdAsync` as an *indirect* caller of `InMemoryOrderRepository.GetByIdAsync`, and both `find_callers` and `analyze_change_impact` discarded indirect callers, which in a DI codebase is nearly all of them. They are now included and labelled `Via: interface | base | implementation` with the member they dispatch through, and change impact counts them
+- **File/line hints did not resolve an ambiguous name on Windows.** The `File` an `AmbiguousMatch` candidate reports used `/`, the hint matcher compared with raw `EndsWith`, so passing it back failed on Windows, and `Service.cs` also matched `OrderService.cs`. Hints now match on directory boundaries with normalized separators
+- **Dependent projects saw stale compilations after an edit.** The custom compilation LRU evicted only the edited project, so projects referencing it kept the previous snapshot's compilation and reported stale diagnostics and symbols. The cache bounded no memory anyway (Roslyn keeps compilations alive through the `Solution`), so it is removed and compilations come straight from the current snapshot
+
+### Fixed
+- **`hooks/pre-bash-guard.sh` now matches command words, not command text** — the guard grepped the raw command string, so it blocked commands that merely *mentioned* a destructive one: a `grep` searching for `rm -rf`, a `#` comment describing an old cleanup, `git log --grep='git reset --hard'`, `echo`ing docs about force push, and any heredoc script body containing the phrase. It now splits the command on `;`, `&&`, `||`, `|`, newlines and grouping, and matches only each segment's command word — taken after stripping `VAR=value` assignments, `sudo`/`env`/`command`/`nohup`, and any leading path, so `/bin/rm` still reads as `rm`
+  - Quoted strings, comments, and heredoc bodies are data and never trigger a rule
+  - Coverage went up rather than down: `sudo rm -rf`, `xargs rm -rf`, `find -exec rm -rf`, `$(...)` and `` `...` `` bodies, and combined `sh -c` flag spellings (`-lc`, `-cx`, `-ec`) are now recognised — an exact `-c` token match had been one letter away from a bypass
+  - Parsing runs in-process instead of spawning six `echo | grep` pipelines, so a typical command costs ~15ms instead of ~79ms
+- **`rm -rf` with no visible target is blocked again** — after the command-word parse, `xargs rm -rf` and `find … -exec rm -rf {} +` had no target the guard could see, so the allowlist loop never ran and the command passed. Paths fed from stdin or `{}` are unknowable, so a forced recursive `rm` without explicit targets now blocks
+- **`hooks/post-edit-format.sh` formatted nothing on Windows** — `dotnet format --include` takes a cwd-relative path and the project argument must be a native path under Git Bash; either mistake was a silent no-op. A failed `dotnet format` is now printed instead of discarded (the hook still exits 0)
+- **`get_diagnostics` file scope no longer returns an empty result for a file it never checked** (#35) — a path matching no document now returns the same `FileNotFound` error as `get_file_outline`, `./` prefixes and backslashes resolve, and a bare name matching several files returns diagnostics for all of them instead of silently using the first. Both tools share one resolver that matches on directory boundaries, so `Program.cs` no longer matches `MyProgram.cs`. `get_file_outline` returns `AmbiguousMatch` with candidates when a name matches more than one file (a multi-targeted project's file still counts as one)
+- **`get_di_registrations` reported 0 on Prism, Autofac, and other containers** (#31) — Prism `IContainerRegistry` and Autofac `ContainerBuilder` registrations are now analysed (matched by resolved receiver type, never by method name alone), including duplicate and captive-dependency checks. Calls into containers the tool cannot map (DryIoc, Unity, Castle Windsor, SimpleInjector, Ninject, Lamar, and others) are counted in a new `Note`, so a zero never reads as "no DI" when it isn't
+- **The navigator locked analyzer and source-generator DLLs in `~/.nuget/packages`** (#25) — a long-lived server held them open (dotnet/roslyn#78196), so `dotnet restore` failed with "Access to the path is denied" after a package upgrade until the process was killed. Analyzers now load from per-process shadow copies through a MEF-exported `IAnalyzerService` that wraps Roslyn's default loader, so generators and dependency resolution behave as before. Copies left by dead processes are cleaned up on the next start
+- **NU1902 on every build** — `Microsoft.SourceLink.GitHub` 8.0.0 pulled in `Microsoft.Build.Tasks.Git` 8.0.0 with a known advisory; bumped to 10.0.403
+- **`.github/scripts/test-hooks.sh` reported false passes where `timeout` is absent** — the watchdog fallback backgrounds the hook, and bash gives an asynchronous command `/dev/null` for stdin unless it carries its own redirection. The hook under test read an empty payload, blocked nothing, and every case "passed". On macOS and minimal Linux images the whole pre-bash-guard suite was vacuous
+
+### Added
+- **Real Claude Code A/B for the navigator** (`mcp/CWM.RoslynNavigator/bench/ab/`): runs each question as a fresh headless `claude -p` session with and without the navigator, records time, tokens, cost and tool calls from the session itself, and scores accuracy with a blinded judge. On 55 questions across five open-source solutions (9 to 270 projects): 654 s → 447 s, $1.88 → $1.29, accuracy 61 → 90. The README benchmark section now leads with these measured results instead of the earlier modelled token estimate
+- **3 new MCP tools (23 → 26) and fuzzy search**, the top items from a comparison against ~15 other Roslyn/C# MCP servers:
+  - **`get_symbol_at`** — file + line + identifier text (or column) → the resolved symbol, its signature, declared type and nullability, definition, and a stable `SymbolId`. Every tool that takes a symbol name now also accepts a `SymbolId` (`M:`, `T:`, … documentation-comment IDs), so an agent can chain calls without ambiguity
+  - **`preview_rename`** — what a rename would change, line by line, plus the compile errors it would introduce. It runs Roslyn's renamer on an immutable copy, so it never touches the workspace or disk
+  - **`get_workspace_status`** — load health per project (failed to load, no documents, missing references, missing analyzers), warm-up progress, loaded solutions. Any empty result from a partially loaded workspace now carries a `WorkspaceWarning`, so "0 results" can't be mistaken for a complete answer
+  - **`find_symbol` `match`:** `exact` (default) | `prefix` | `camelhump` | `substring`, ranked, each result with a `SymbolId`. `SymbolNotFound` errors now suggest up to 5 `DidYouMean` names
+- **The Roslyn navigator loads several solutions at once** (#16) — for microservice repos where one feature spans several `.sln`/`.slnx` files. Repeat `--solution`, or pass `--all-solutions` to load every solution found within the discovery depth (and one from each MCP root). All solutions share one workspace, so every tool works across them with no new parameters, a library shared by several solutions loads and compiles once, and `find_references` follows calls across solution boundaries. `get_project_graph` lists the loaded solutions and which solution(s) each project belongs to. Single-solution behaviour and output are unchanged
+- **General .NET apps are first-class** (#34) — the kit was web-API shaped; console tools, CLIs, and desktop apps now get the same depth. Every code example was compile-checked against the current packages
+  - **4 new skills (48 → 52):** `console-cli` (System.CommandLine 2.0 stable, Generic Host in console apps, exit codes, stdout/stderr discipline, Ctrl+C, dotnet tools, `dotnet run app.cs`), `desktop-mvvm` (CommunityToolkit.Mvvm 8.4 partial properties and async commands across WPF, Avalonia, WinForms, MAUI), `avalonia` (Avalonia 12: compiled bindings on by default, ControlThemes, trim-safe view location, AOT), `native-aot` (PublishAot, source generators, fixing IL2xxx/IL3xxx warnings, when not to use AOT)
+  - **`app-engineer` agent (10 → 11)** for console, CLI, and desktop work
+  - **2 new templates (5 → 7):** `console-cli` and `desktop-app`
+  - **`/dotnet-init` detects Console, CLI tool, Desktop, and Library projects** and asks questions that fit them instead of web-API architecture questions
+- **ADR-007** — why the Bash guard parses commands instead of matching text, the alternatives rejected, and the two-directional test every new rule needs
+- 42 hook behavior tests covering both directions of each guard rule: the destructive command blocked, and a benign command that merely mentions it allowed
+- **`hooks/pre-bash-guard.sh` guards resources shared across the machine**, not just the working tree — on a developer box running several agents, or any shared build host, these reach past the current project:
+  - `pkill` and `killall` match by name or pattern, so they reap every match on the machine. `kill` is blocked when its target is not a numeric PID, a job spec, or a `$VAR` holding one — `kill $(pgrep -f MyApp)` kills whatever else matched
+  - `dotnet build-server shutdown` stops the MSBuild, Razor and VB/C# compiler servers for every process on the machine, not just the current build
+  - Recursive deletes of `~/.nuget`, `~/.dotnet`, `~/.templateengine` and `~/.local/share/NuGet`, with or without `-f`. `rm -rf ~/.dotnet/bin` was previously allowed outright, since the target ends in `bin`
+
+## [0.14.0] — 2026-08-07
+
+Completes the token-savings measurement: the in-session number now has a cross-repository aggregate behind it, and the one estimated input has a way to be measured.
+
+### Added
+- **`CWM.RoslynNavigator.Stats` CLI** — aggregates savings across every repository, with a tool leaderboard, separate miss-rate figures, and table / `--json` / `--markdown` output.
+- **Transcript mining** — real measured token spend and adoption rate, read from Claude Code transcripts. Adoption needs no opt-in, so it is available even in repositories where telemetry was never enabled.
+- **`stats calibrate`** — derives the bytes-per-token divisor from exact `count_tokens` results, with a seeded sample so a run can be reproduced and checked. Manual, and never invoked by the server, which stays offline.
+- **`/token-report` skill (16 → 17 slash commands)** — runs both surfaces and states the three caveats that must accompany any quoted figure.
+
+### Changed
+- **The repository join reads `cwd` from transcript line content** instead of decoding the transcript directory name. The design flagged that decode as its most fragile part, and correctly: the encoding is lossy, and `dotnet-claude-kit` cannot be recovered from `C--Users-...-dotnet-claude-kit` because its hyphens are indistinguishable from path separators. The decode survives only as a fallback.
+- **Adoption excludes repositories where the server was never used**, since including them would drag the aggregate down for reasons unrelated to the tools, and counts only Read/Grep/Glob calls that demonstrably targeted C#. That biases adoption upward, which the report discloses.
+- **Reports distinguish "no data" from "data exists and the server was never invoked"** — very different findings that a single empty report would conflate.
+- The Stats CLI mirrors the server's record type rather than referencing it, so a JSONL reader does not pull in the Roslyn workspace stack. A contract test round-trips a real server record through the mirror so the duplication cannot drift.
+
+## [0.13.0] — 2026-08-07
+
+Measures the kit's central claim instead of asserting it.
+
+### Added
+- **`get_token_savings` MCP tool (22 → 23)** in CWM.RoslynNavigator 0.11.0 — reports tokens saved in the current repository with a per-tool leaderboard and separate zero-result, not-ready, and error counts.
+- **Opt-in local telemetry** (`CWM_ROSLYN_TELEMETRY=on`, off by default). Nothing is transmitted — there is no network call anywhere in the collection path, no identity, and no cross-machine correlation. Records are appended under `%LOCALAPPDATA%`, outside the repository, so there is nothing to gitignore and no way to commit usage data by accident.
+
+### Changed
+- **The savings baseline is the file-read floor**, not a hardcoded per-tool constant: the on-disk size of the source files each answer was actually derived from. Three rules keep it conservative and all three push the number down — a file counts once per session (without the tool it would have been read once and stayed in context), paths deduplicate within a call, and no call may claim more than the repository contains. Errors, zero-result calls, and calls made while the workspace was loading contribute nothing.
+- **The bytes-per-token divisor is an uncalibrated estimate (3.5)** and every report says so, returning `DivisorCalibrated: false`. Calibration against measured token counts is deliberately deferred rather than quietly assumed.
+- Collection hangs off a **single MCP call-tool filter** rather than a line in each of the 22 tool methods — verified available in the pinned SDK 1.4.1, resolving the design's open question. Every tool is measured including ones added later, with no per-tool line to forget.
+- `get_public_api` and `get_type_hierarchy` now report the resolved type's `File` and `Line`. Useful independently, and it closes the only gap where a tool could not contribute a baseline.
+
 ## [0.12.0] — 2026-08-07
 
 Roslyn Navigator correctness release. Symbol resolution, response contracts, and workspace reload behaviour are corrected, and two tools are added: stack trace resolution and change impact analysis.

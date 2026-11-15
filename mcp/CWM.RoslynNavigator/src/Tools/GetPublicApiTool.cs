@@ -9,11 +9,12 @@ namespace CWM.RoslynNavigator.Tools;
 [McpServerToolType]
 public static class GetPublicApiTool
 {
-    [McpServerTool(Name = "get_public_api"), Description("Get the public members of a type without reading the full source file. Returns method signatures, properties, events.")]
+    [McpServerTool(Name = "get_public_api"), Description("Public members of a type (method, property, and event signatures) without reading the file.")]
     public static async Task<string> ExecuteAsync(
         WorkspaceManager workspace,
-        [Description("Type name. Bare ('OrderService') or namespace-qualified ('MyApp.Orders.OrderService').")] string typeName,
-        [Description("Maximum members to return. TotalFound in the response reports the full count; re-query with a higher value if it exceeds Count.")] int maxResults = 50,
+        [Description("Type name or SymbolId")] string typeName,
+        int maxResults = 50,
+        int? offset = null,
         CancellationToken ct = default)
     {
         var notReady = await workspace.EnsureReadyOrStatusAsync(ct);
@@ -25,7 +26,7 @@ public static class GetPublicApiTool
         var symbol = resolved.Symbol;
 
         if (symbol is not INamedTypeSymbol typeSymbol)
-            return JsonSerializer.Serialize(new ErrorResponse(
+            return ToolJson.Serialize(new ErrorResponse(
                 ErrorCodes.WrongSymbolKind,
                 $"'{typeName}' resolved to a {SymbolResolver.GetKindString(symbol)}, not a type."));
 
@@ -39,11 +40,17 @@ public static class GetPublicApiTool
                 Accessibility: m.DeclaredAccessibility.ToString().ToLowerInvariant()))
             .ToList();
 
-        var page = Paging.Apply(allMembers, maxResults);
+        var page = Paging.Apply(allMembers, maxResults, offset ?? 0);
         var typeKind = SymbolResolver.GetKindString(typeSymbol);
+        var location = SymbolResolver.GetLocation(typeSymbol);
+        var file = location is { } loc ? workspace.ToRelativePath(loc.File) : null;
 
-        return JsonSerializer.Serialize(new PublicApiResult(
-            typeKind, page.Items, page.Count, page.TotalFound, page.Truncated, page.Limit));
+        return Paging.Fit(page, p => ToolJson.Serialize(new PublicApiResult(
+            typeKind, p.Items, p.Count, p.TotalFound, p.Truncated, p.Limit,
+            File: file,
+            Line: location?.Line ?? 0,
+            Offset: p.Offset,
+            NextOffset: p.NextOffset)));
     }
 
     private static string GetMemberKind(ISymbol symbol) => symbol switch
